@@ -1,22 +1,42 @@
-"""
-KAN-based Emotion Prediction Module
-Loads the trained KAN model and predicts emotions from real-time EEG data.
-"""
+"""Emotion Prediction Module (EmotionNet)
+Loads the trained neural network and predicts emotions from real-time EEG data."""
 
 import os
 import pickle
 import numpy as np
 import pandas as pd
 import torch
+from torch import nn
 from pylsl import StreamInlet, resolve_byprop
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 import warnings
 warnings.filterwarnings("ignore")
 
 
+class EmotionNet(nn.Module):
+    """Lightweight feedforward network for EEG-derived features."""
+
+    def __init__(self, input_dim=8, num_classes=4, hidden=64, dropout=0.25):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden // 2),
+            nn.BatchNorm1d(hidden // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden // 2, num_classes),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class EmotionPredictor:
     """
-    Handles emotion prediction from EEG brainwave data using a trained KAN model.
+    Handles emotion prediction from EEG brainwave data using a trained EmotionNet model.
     """
     
     def __init__(self, model_path='models/mood_model.pth', 
@@ -26,7 +46,7 @@ class EmotionPredictor:
         Initialize the emotion predictor with model, scaler, and label encoder.
         
         Args:
-            model_path: Path to the trained KAN model (.pth file)
+            model_path: Path to the trained EmotionNet model (.pth file)
             scaler_path: Path to the StandardScaler (.pkl file)
             label_encoder_path: Path to the LabelEncoder (.pkl file)
         """
@@ -34,6 +54,7 @@ class EmotionPredictor:
         self.scaler_path = scaler_path
         self.label_encoder_path = label_encoder_path
         self.SampleRate = 256  # Muse S sampling rate
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load model and preprocessors
         self._load_model()
@@ -43,19 +64,12 @@ class EmotionPredictor:
         print("EmotionPredictor initialized successfully!")
     
     def _load_model(self):
-        """Load the trained KAN model."""
+        """Load the trained EmotionNet model."""
         try:
-            from kan import KAN
-            
-            # Initialize model with same architecture as training (BEFORE pruning)
-            # KAN(width=[5, 16, 8, 4]) - 5 inputs, 4 emotion outputs
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.model = KAN(width=[5, 16, 8, 4], grid=2, k=3, seed=42, device=device)
-            
-            # Load the saved state dict
-            self.model.load_state_dict(torch.load(self.model_path, map_location=device))
-            self.model.eval()  # Set to evaluation mode
-            
+            self.model = EmotionNet(input_dim=8, num_classes=4)
+            self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+            self.model.to(self.device)
+            self.model.eval()
             print(f"✓ Model loaded from: {self.model_path}")
         except Exception as e:
             raise FileNotFoundError(f"Failed to load model: {e}")
@@ -77,6 +91,36 @@ class EmotionPredictor:
             print(f"✓ Label encoder loaded from: {self.label_encoder_path}")
         except Exception as e:
             raise FileNotFoundError(f"Failed to load label encoder: {e}")
+
+    @staticmethod
+    def _build_feature_vector(brainwave_bins):
+        """
+        Convert raw band powers into the 8-feature vector used during training.
+
+        Args:
+            brainwave_bins: List/array of relative band powers [Delta, Theta, Alpha, Beta, Gamma]
+
+        Returns:
+            np.ndarray of shape (8,)
+        """
+        if len(brainwave_bins) < 5:
+            raise ValueError("Expected five brainwave bins (Delta, Theta, Alpha, Beta, Gamma)")
+
+        delta, theta, alpha, beta, gamma = brainwave_bins[:5]
+        alpha_theta_ratio = alpha / (theta + 1e-8)
+        beta_alpha_ratio = beta / (alpha + 1e-8)
+        low_freq_high_freq = (delta + theta) / (beta + gamma + 1e-8)
+
+        return np.array([
+            delta,
+            theta,
+            alpha,
+            beta,
+            gamma,
+            alpha_theta_ratio,
+            beta_alpha_ratio,
+            low_freq_high_freq,
+        ], dtype=float)
     
     def stream_eeg_data(self, duration=5):
         """
@@ -202,25 +246,25 @@ class EmotionPredictor:
         Returns:
             Predicted emotion as string
         """
-        # Convert to numpy array and reshape for scaler
-        bins_array = np.array(brainwave_bins).reshape(1, -1)
-        
+        # Build full feature vector (absolute + derived ratios)
+        features = self._build_feature_vector(brainwave_bins).reshape(1, -1)
+
         # Standardize using the same scaler from training
-        bins_scaled = self.scaler.transform(bins_array)
+        bins_scaled = self.scaler.transform(features)
         
         # DEBUG: Print scaled values
         print(f"   Scaled features: {bins_scaled[0]}")
         
         # Convert to tensor
-        bins_tensor = torch.tensor(bins_scaled, dtype=torch.float32)
+        bins_tensor = torch.tensor(bins_scaled, dtype=torch.float32, device=self.device)
         
         # Make prediction
         with torch.no_grad():
             logits = self.model(bins_tensor)
             predicted_class_idx = torch.argmax(logits, dim=1).item()
-            
+
             # DEBUG: Print raw logits
-            print(f"   Raw logits: {logits[0].numpy()}")
+            print(f"   Raw logits: {logits[0].detach().cpu().numpy()}")
             print(f"   Predicted class: {predicted_class_idx}")
         
         # Use the persisted label encoder to decode class index

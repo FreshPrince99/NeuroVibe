@@ -132,8 +132,8 @@ class EmotionPredictor:
         Returns:
             List of 5 power bin values [Delta, Theta, Alpha, Beta, Gamma]
         """
-        # Use the first channel for now (you can average all channels if needed)
-        channel = eeg_data[0].copy()  # Make a copy to avoid modifying original
+        # Average across available channels to reduce electrode-specific noise
+        channel = eeg_data.mean(axis=0).copy()
         
         # Apply low-pass filter to remove high-frequency noise (like in NeuroTune training)
         # This is CRITICAL - training data was filtered!
@@ -176,13 +176,19 @@ class EmotionPredictor:
                 binsTotal[4] += outMag[point]
                 binsCount[4] += 1
         
-        # Compute averages
+        # Compute absolute averages
         binsAverage = [total / count if count != 0 else 0 
                       for total, count in zip(binsTotal, binsCount)]
         
-        print(f"✓ Brainwave bins computed: Delta={binsAverage[0]:.2f}, "
-              f"Theta={binsAverage[1]:.2f}, Alpha={binsAverage[2]:.2f}, "
-              f"Beta={binsAverage[3]:.2f}, Gamma={binsAverage[4]:.2f}")
+        # Convert to RELATIVE power (normalize by total)
+        # This makes features robust across sessions and signal magnitudes
+        total_power = sum(binsAverage)
+        if total_power > 0:
+            binsAverage = [b / total_power for b in binsAverage]
+        
+        print(f"✓ Brainwave bins computed (relative power): Delta={binsAverage[0]:.4f}, "
+              f"Theta={binsAverage[1]:.4f}, Alpha={binsAverage[2]:.4f}, "
+              f"Beta={binsAverage[3]:.4f}, Gamma={binsAverage[4]:.4f}")
         
         return binsAverage
     
@@ -217,10 +223,13 @@ class EmotionPredictor:
             print(f"   Raw logits: {logits[0].numpy()}")
             print(f"   Predicted class: {predicted_class_idx}")
         
-        # Manual mapping since label encoder returns integers
-        # Based on your training: Angry=0, Happy=1, Relaxed=2, Sad=3
-        emotion_map = {0: "Angry", 1: "Happy", 2: "Relaxed", 3: "Sad"}
-        predicted_emotion = emotion_map.get(predicted_class_idx, "Unknown")
+        # Use the persisted label encoder to decode class index
+        try:
+            predicted_emotion = self.label_encoder.inverse_transform([predicted_class_idx])[0]
+        except Exception:
+            # Fallback mapping if label encoder is unavailable
+            emotion_map = {0: "Angry", 1: "Happy", 2: "Relaxed", 3: "Sad"}
+            predicted_emotion = emotion_map.get(predicted_class_idx, "Unknown")
         
         # Map "Angry" to "Stressed" (as done in NeuroTune)
         if predicted_emotion == "Angry":

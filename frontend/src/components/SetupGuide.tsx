@@ -1,5 +1,8 @@
 'use client';
 import { useState } from 'react';
+import Image from 'next/image';
+import museImage from '@/assets/muse.jpg';
+import pairImage from '@/assets/pair.png';
 
 interface SetupGuideProps {
   onConnect: () => Promise<void>;
@@ -93,7 +96,15 @@ export default function SetupGuide({
           {/* Step 1: Power On Instructions */}
           {currentStep === 1 && (
             <div className="text-center space-y-6">
-              <div className="text-8xl mb-6">🔌</div>
+              <div className="mb-6 rounded-xl overflow-hidden max-w-md mx-auto">
+                <Image 
+                  src={museImage} 
+                  alt="Muse Headset" 
+                  width={400}
+                  height={300}
+                  className="w-full h-auto object-cover"
+                />
+              </div>
               <h2 className="text-4xl font-bold mb-4">Power On Your Muse Headset</h2>
               <p className="text-xl text-gray-400 mb-8">
                 Press and hold the power button on your Muse headset until the LED starts blinking blue.
@@ -124,7 +135,15 @@ export default function SetupGuide({
           {/* Step 2: Connect Muse */}
           {currentStep === 2 && (
             <div className="text-center space-y-6">
-              <div className="text-8xl mb-6">📡</div>
+              <div className="mb-6 rounded-xl overflow-hidden max-w-md mx-auto">
+                <Image 
+                  src={pairImage} 
+                  alt="Bluetooth Pairing" 
+                  width={400}
+                  height={300}
+                  className="w-full h-auto object-cover"
+                />
+              </div>
               <h2 className="text-4xl font-bold mb-4">Connect Your Muse Headset</h2>
               <p className="text-xl text-gray-400 mb-8">
                 Click the button below to open the Bluetooth device selector and choose your Muse headset.

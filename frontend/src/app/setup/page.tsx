@@ -13,6 +13,7 @@ export default function SetupPage() {
   const [connectionStatus, setConnectionStatus] = useState('');
   const [spotifyAuthenticated, setSpotifyAuthenticated] = useState(false);
   const [isClient, setIsClient] = useState(false);
+  const [showLoadingScreen, setShowLoadingScreen] = useState(false);
   
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -82,7 +83,7 @@ export default function SetupPage() {
       }
       
       setSpotifyAuthenticated(true);
-      setConnectionStatus('Spotify connected successfully!');
+      setShowLoadingScreen(true);
       
       // Clear flags
       localStorage.removeItem('neurovibe_awaiting_spotify');
@@ -90,10 +91,10 @@ export default function SetupPage() {
       // Clean up URL
       window.history.replaceState({}, document.title, window.location.pathname);
       
-      // Auto-transition to main after a brief moment
+      // Redirect to emotion page after brief delay
       setTimeout(() => {
         router.push('/emotion');
-      }, 1500);
+      }, 2000);
     }
   }, [isClient, router]);
 
@@ -176,6 +177,48 @@ export default function SetupPage() {
     // Navigate to main emotion view
     router.push('/emotion');
   };
+
+  // Show loading screen after Spotify auth
+  if (showLoadingScreen) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-black text-white">
+        <div className="max-w-2xl mx-auto text-center space-y-8 px-4">
+          {/* Animated checkmark */}
+          <div className="relative">
+            <div className="w-32 h-32 mx-auto rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center animate-pulse">
+              <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+          </div>
+
+          {/* Success messages */}
+          <div className="space-y-4">
+            <h2 className="text-4xl font-bold bg-gradient-to-r from-green-400 to-blue-500 bg-clip-text text-transparent">
+              All Set! 🎉
+            </h2>
+            <div className="space-y-2 text-lg text-gray-300">
+              <p className="flex items-center justify-center gap-2">
+                <span className="text-green-400">✓</span> Muse headset configured
+              </p>
+              <p className="flex items-center justify-center gap-2">
+                <span className="text-green-400">✓</span> Spotify connected
+              </p>
+            </div>
+          </div>
+
+          {/* Loading animation */}
+          <div className="flex flex-col items-center gap-4 pt-8">
+            <svg className="animate-spin h-8 w-8 text-purple-500" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p className="text-gray-400">Preparing your experience...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <SetupGuide 

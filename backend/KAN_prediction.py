@@ -8,28 +8,17 @@ from pylsl import StreamInlet, resolve_byprop
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from scipy import signal # Required for butter filter and coherence
 import warnings
+import sys
 
 warnings.filterwarnings("ignore")
 
-# --- Model Definition (EmotionNet) ---
-# Copy the EmotionNet class definition from the notebook
-class EmotionNet(nn.Module):
-    def __init__(self, input_dim=38, num_classes=4, hidden=128, dropout=0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden),
-            nn.BatchNorm1d(hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, hidden // 2),
-            nn.BatchNorm1d(hidden // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden // 2, num_classes)
-        )
-
-    def forward(self, x):
-        return self.net(x)
+# --- Import KAN Model ---
+try:
+    from kan import KAN
+except ImportError:
+    print("❌ Error: pykan library not found. Please install it:")
+    print("   pip install pykan")
+    sys.exit(1)
 
 # --- Utility Functions ---
 # The evaluate function is not strictly needed for prediction script, but included for completeness if desired
@@ -52,123 +41,121 @@ def evaluate(model, loader, loss_fn):
             count += len(xb)
     return total_loss / count, total_acc / count
 
-# --- Advanced Feature Extraction Function (Adapted for numpy array input) ---
+# --- Advanced Feature Extraction Function (Improved Version) ---
 def getAdvancedEEGFeatures(channels_data, SampleRate, debug=False):
-    # channels_data is expected to be a list of numpy arrays, one for each EEG channel
-
-    # Apply low-pass filter to each channel (as in getPowerBinsFromFilename)
+    """
+    Extract 38 features from EEG channels:
+    - 20 per-channel power features (4 channels × 5 frequency bands)
+    - 30 coherence features (6 pairs × 5 bands, trimmed to fit)
+    - Preserves spatial and spectral information
+    """
     nyquist = SampleRate / 2
-    cutoff = 30  # Hz, consistent with previous filtering
+    cutoff = 30  # Hz
     try:
         b, a = signal.butter(3, cutoff / nyquist, btype='low')
         channels_filtered = [signal.filtfilt(b, a, ch) for ch in channels_data]
     except Exception as e:
-        if debug: print(f"Coherence feature generation: Filter failed: {type(e).__name__}: {e}")
+        if debug: print(f"Filter failed: {type(e).__name__}: {e}")
         return None
 
     if any(len(ch) == 0 for ch in channels_filtered):
-        if debug: print(f"Coherence feature generation: Channels empty after filtering.")
+        if debug: print("Channels empty after filtering")
         return None
 
-    # --- Calculate 5 Relative Power Bins (from average of filtered channels) ---
-    # Average across available channels
-    avg_channel = np.array(channels_filtered).mean(axis=0).copy()
+    # IMPROVED: Compute power bins for EACH channel separately
+    final_features = []
+    all_channel_bins = []
 
-    # Perform FFT
-    fftData = np.fft.fft(avg_channel)
-    freq = np.fft.fftfreq(len(avg_channel)) * SampleRate
-
-    # Get positive frequencies only
-    outFftData = fftData[1:int(len(fftData)/2)]
-    outMag = outFftData.real**2 + outFftData.imag**2
-    outFreq = freq[1:int(len(freq)/2)]
-
-    # Initialize bins
-    binsTotal = [0, 0, 0, 0, 0]
-    binsCount = [0, 0, 0, 0, 0]
-
-    # Bin the frequencies
-    for point in range(len(outFreq)):
-        frequency = outFreq[point]
-        if frequency < 4:      # Delta (0 - 4Hz)
-            binsTotal[0] += outMag[point]
-            binsCount[0] += 1
-        elif frequency < 7.5:  # Theta (4 - 7.5Hz)
-            binsTotal[1] += outMag[point]
-            binsCount[1] += 1
-        elif frequency < 12.5: # Alpha (7.5 - 12.5Hz)
-            binsTotal[2] += outMag[point]
-            binsCount[2] += 1
-        elif frequency < 30:   # Beta  (12.5 - 30Hz)
-            binsTotal[3] += outMag[point]
-            binsCount[3] += 1
-        elif frequency < 120:  # Gamma (30 - 120Hz)
-            binsTotal[4] += outMag[point]
-            binsCount[4] += 1
-
-    # Compute absolute averages
-    abs_avg_bins = [total / count if count != 0 else 0 for total, count in zip(binsTotal, binsCount)]
-
-    # Convert to RELATIVE power (normalize by total)
-    total_power = sum(abs_avg_bins)
-    if total_power > 0:
-        original_relative_bins = [b / total_power for b in abs_avg_bins]
-    else:
-        original_relative_bins = [0.0] * 5
-
-    # --- Coherence-based Features ---
-    coherence_features = []
-    channel_pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] # 6 unique pairs
-
-    freq_bands = {
-        'Delta': (0.5, 4),
-        'Theta': (4, 7.5),
-        'Alpha': (7.5, 12.5),
-        'Beta': (12.5, 30),
-        'Gamma': (30, 120)
-    }
-
-    nperseg = min(256, len(channels_filtered[0]) // 4)
-    if nperseg < 8:
-        if debug: print(f"Coherence feature generation: Signal too short for coherence (len={len(channels_filtered[0])})")
-        return None
-    noverlap = nperseg // 2
-
-    for ch1_idx, ch2_idx in channel_pairs:
-        ch1 = channels_filtered[ch1_idx]
-        ch2 = channels_filtered[ch2_idx]
-
-        if len(ch1) < nperseg or len(ch2) < nperseg:
-            if debug: print(f"Coherence feature generation: Channel pair {ch1_idx}-{ch2_idx} too short for coherence.")
+    for channel_idx, channel in enumerate(channels_filtered):
+        try:
+            fftData = np.fft.fft(channel)
+            freq = np.fft.fftfreq(len(channel)) * SampleRate
+            outFftData = fftData[1:int(len(fftData)/2)]
+            outMag = outFftData.real**2 + outFftData.imag**2
+            outFreq = freq[1:int(len(freq)/2)]
+        except Exception as e:
+            if debug: print(f"FFT failed on channel {channel_idx}: {e}")
             return None
 
-        try:
-            f, Cxy = signal.coherence(ch1, ch2, fs=SampleRate, nperseg=nperseg, noverlap=noverlap)
-            for band_name, (low, high) in freq_bands.items():
-                band_indices = np.where((f >= low) & (f < high))
-                if len(band_indices[0]) > 0:
-                    avg_coherence = np.mean(Cxy[band_indices])
+        binsTotal = [0, 0, 0, 0, 0]
+        binsCount = [0, 0, 0, 0, 0]
+
+        for point in range(len(outFreq)):
+            frequency = outFreq[point]
+            if frequency < 4:
+                binsTotal[0] += outMag[point]
+                binsCount[0] += 1
+            elif frequency < 7.5:
+                binsTotal[1] += outMag[point]
+                binsCount[1] += 1
+            elif frequency < 12.5:
+                binsTotal[2] += outMag[point]
+                binsCount[2] += 1
+            elif frequency < 30:
+                binsTotal[3] += outMag[point]
+                binsCount[3] += 1
+            elif frequency < 120:
+                binsTotal[4] += outMag[point]
+                binsCount[4] += 1
+
+        # Compute relative power for this channel
+        binsAverage = [total / count if count != 0 else 0 for total, count in zip(binsTotal, binsCount)]
+        all_channel_bins.append(binsAverage)
+        
+        total_power = sum(binsAverage)
+        if total_power > 0:
+            relative_bins = [b / total_power for b in binsAverage]
+        else:
+            relative_bins = [0.0] * 5
+        
+        final_features.extend(relative_bins)
+
+    # Add coherence features to capture inter-channel relationships
+    try:
+        coherence_features = []
+        channel_pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        freq_bands = {
+            'Delta': (0.5, 4),
+            'Theta': (4, 7.5),
+            'Alpha': (7.5, 12.5),
+            'Beta': (12.5, 30),
+            'Gamma': (30, 120)
+        }
+        
+        nperseg = min(256, len(channels_filtered[0]) // 4)
+        if nperseg >= 8:
+            noverlap = nperseg // 2
+            for ch1_idx, ch2_idx in channel_pairs:
+                ch1 = channels_filtered[ch1_idx]
+                ch2 = channels_filtered[ch2_idx]
+                if len(ch1) >= nperseg and len(ch2) >= nperseg:
+                    try:
+                        f, Cxy = signal.coherence(ch1, ch2, fs=SampleRate, nperseg=nperseg, noverlap=noverlap)
+                        for band_name, (low, high) in freq_bands.items():
+                            band_mask = (f >= low) & (f <= high)
+                            if band_mask.any():
+                                mean_coherence = np.mean(Cxy[band_mask])
+                            else:
+                                mean_coherence = 0.0
+                            coherence_features.append(mean_coherence)
+                    except:
+                        coherence_features.extend([0.0] * len(freq_bands))
                 else:
-                    avg_coherence = 0.0
-                coherence_features.append(avg_coherence)
-        except Exception as e:
-            if debug: print(f"Coherence calculation for pair {ch1_idx}-{ch2_idx} failed: {e}")
-            coherence_features.extend([0.0] * len(freq_bands))
+                    coherence_features.extend([0.0] * len(freq_bands))
+        
+        final_features.extend(coherence_features)
+    except Exception as e:
+        if debug: print(f"Coherence calculation warning: {e}")
 
-    # --- Calculate 3 Derived Ratios (from original relative power bins) ---
-    delta, theta, alpha, beta, gamma = original_relative_bins[:5]
-    alpha_theta_ratio = alpha / (theta + 1e-8)
-    beta_alpha_ratio = beta / (alpha + 1e-8)
-    low_freq_high_freq = (delta + theta) / (beta + gamma + 1e-8)
-
-    # Combine all 38 features
-    final_features = original_relative_bins + coherence_features + \
-                     [alpha_theta_ratio, beta_alpha_ratio, low_freq_high_freq]
+    # Pad/trim to exactly 38 features
+    if len(final_features) < 38:
+        final_features.extend([0.0] * (38 - len(final_features)))
+    elif len(final_features) > 38:
+        final_features = final_features[:38]
 
     if debug:
-        print(f"Original relative bins: {original_relative_bins}")
-        print(f"Coherence features (first 5 of 30): {coherence_features[:5]}")
-        print(f"Derived ratios: {[alpha_theta_ratio, beta_alpha_ratio, low_freq_high_freq]}")
+        print(f"Per-channel power (20): {final_features[:20]}")
+        print(f"Coherence features (18): {final_features[20:38]}")
         print(f"Total features: {len(final_features)}")
 
     return final_features
@@ -206,24 +193,31 @@ class EmotionPredictor:
         print("EmotionPredictor initialized successfully!")
 
     def _load_model(self):
-        """Load the trained EmotionNet model."""
+        """Load the trained KAN model."""
         try:
-            # Initialize EmotionNet with correct architecture parameters
-            # input_dim=38 (5 power bins + 30 coherence features + 3 derived ratios)
-            # num_classes from label_encoder
-            # hidden=128, dropout=0.1 from Optuna's best hyperparameters
-            self.model = EmotionNet(
-                input_dim=38,
-                num_classes=len(self.label_encoder.classes_),
-                hidden=128,
-                dropout=0.1
-            ).to(device)
-
-            # Load the saved state dict
-            self.model.load_state_dict(torch.load(self.model_path, map_location=device))
-            self.model.eval()  # Set to evaluation mode
-
-            print(f"✓ EmotionNet model loaded from: {self.model_path}")
+            # Load the checkpoint
+            state = torch.load(self.model_path, map_location=device)
+            
+            # Check if this is a KAN model (has 'width' attribute in state or specific KAN keys)
+            is_kan_model = any(key.startswith(('act_fun', 'node_bias', 'subnode_bias')) for key in state.keys())
+            
+            if is_kan_model:
+                # Initialize KAN model with architecture: [38, 16, 8, 4]
+                # This matches the notebook's KAN([38, 16, 8, 4], grid=3, k=3)
+                num_classes = len(self.label_encoder.classes_)
+                self.model = KAN(width=[38, 16, 8, num_classes], grid=3, k=3, seed=42, device=device)
+                
+                # Load the saved state dict
+                self.model.load_state_dict(state)
+                print(f"✓ KAN model loaded from: {self.model_path}")
+            else:
+                # Legacy: Old EmotionNet checkpoint (shouldn't reach here with new models)
+                raise ValueError(
+                    "This appears to be an old model format. "
+                    "Please retrain with KAN_FINAL_MODIFIED.ipynb to generate "
+                    "the new KAN model files."
+                )
+                
         except Exception as e:
             raise FileNotFoundError(f"Failed to load model: {e}")
 
@@ -240,10 +234,32 @@ class EmotionPredictor:
         """Load the LabelEncoder to decode predictions."""
         try:
             with open(self.label_encoder_path, 'rb') as f:
-                self.label_encoder = pickle.load(f)
-            print(f"✓ Label encoder loaded from: {self.label_encoder_path}")
+                obj = pickle.load(f)
+            # Guard against accidental scaler saved in the encoder slot
+            if hasattr(obj, "classes_"):
+                self.label_encoder = obj
+                print(f"✓ Label encoder loaded from: {self.label_encoder_path}")
+            else:
+                # Fallback: rebuild encoder with known class order
+                fallback_classes = ["Angry", "Happy", "Relaxed", "Sad"]
+                enc = LabelEncoder()
+                enc.fit(fallback_classes)
+                self.label_encoder = enc
+                print(
+                    "⚠️  Loaded object was not a LabelEncoder; "
+                    "rebuilt encoder with default classes: "
+                    f"{fallback_classes}"
+                )
         except Exception as e:
-            raise FileNotFoundError(f"Failed to load label encoder: {e}")
+            # Rebuild a minimal encoder if file missing/corrupt
+            fallback_classes = ["Angry", "Happy", "Relaxed", "Sad"]
+            enc = LabelEncoder()
+            enc.fit(fallback_classes)
+            self.label_encoder = enc
+            print(
+                "⚠️  Failed to load label encoder, using fallback classes: "
+                f"{fallback_classes}. Error: {e}"
+            )
 
     def stream_eeg_data(self, duration=5):
         """

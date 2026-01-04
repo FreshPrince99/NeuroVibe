@@ -1,0 +1,183 @@
+'use client';
+import { useState } from 'react';
+import Player from './player';
+
+interface EmotionViewProps {
+  predictedEmotion: string;
+  isUsingMusePrediction: boolean;
+  sampleCount: number;
+  connectionStatus: string;
+  onDisconnect: () => void;
+  needsReconnect?: boolean;
+  isConnecting?: boolean;
+  onReconnect?: () => void;
+}
+
+export default function EmotionView({ 
+  predictedEmotion, 
+  isUsingMusePrediction,
+  sampleCount,
+  connectionStatus,
+  onDisconnect,
+  needsReconnect = false,
+  isConnecting = false,
+  onReconnect
+}: EmotionViewProps) {
+  const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
+  const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
+
+  const emotions = [
+    { name: "happy", color: "bg-yellow-400" },
+    { name: "sad", color: "bg-blue-500" },
+    { name: "angry", color: "bg-red-500" },
+    { name: "relaxed", color: "bg-green-400" },
+  ];
+
+  const getCurrentColor = () => {
+    const currentEmotion = useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion;
+    return emotions.find((e) => e.name === currentEmotion)?.color || "bg-gray-300";
+  };
+
+  const getDisplayEmotion = () => {
+    return useMusePrediction && predictedEmotion ? predictedEmotion : selectedEmotion;
+  };
+
+  // Update useMusePrediction when new prediction comes in
+  if (predictedEmotion && !useMusePrediction && isUsingMusePrediction) {
+    setUseMusePrediction(true);
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col bg-zinc-50 dark:bg-black">
+      {/* Header */}
+      <header className="w-full border-b border-zinc-200 bg-white py-4 dark:border-zinc-800 dark:bg-black">
+        <div className="container mx-auto px-8 flex items-center justify-between">
+          <h1 className="text-3xl font-bold text-black dark:text-white">
+            NeuroVibe
+          </h1>
+          
+          {/* Status Badge */}
+          <div className="flex items-center gap-4">
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              <span className="font-semibold">{sampleCount}</span> samples
+            </div>
+            <div className="px-4 py-2 rounded-full bg-green-500/20 text-green-400 border border-green-500/50 text-sm">
+              {connectionStatus || 'Connected'}
+            </div>
+            <button
+              onClick={onDisconnect}
+              className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors text-sm font-semibold"
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex flex-1 flex-col lg:flex-row">
+        {/* Reconnect Overlay */}
+        {needsReconnect && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl border border-gray-200 dark:border-gray-800">
+              <div className="text-6xl mb-4">📡</div>
+              <h2 className="text-2xl font-bold mb-4 text-black dark:text-white">
+                Reconnect Your Muse Headset
+              </h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Web Bluetooth connections don't persist across pages. Click below to reconnect and start streaming EEG data.
+              </p>
+              <button
+                onClick={onReconnect}
+                disabled={isConnecting}
+                className="w-full px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-blue-500 to-purple-500 rounded-full hover:shadow-2xl hover:shadow-purple-500/50 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+              >
+                {isConnecting ? (
+                  <span className="flex items-center justify-center gap-3">
+                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Connecting...
+                  </span>
+                ) : (
+                  'Reconnect Muse Headset'
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Left Side - Emotion Circle & Controls */}
+        <div className="flex flex-1 flex-col items-center justify-center gap-8 p-8">
+          {/* Circle */}
+          <div
+            className={`flex h-64 w-64 items-center justify-center rounded-full ${getCurrentColor()} transition-colors duration-500 shadow-lg`}
+          >
+            <div className="text-center">
+              <span className="text-3xl font-semibold capitalize text-white">
+                {getDisplayEmotion()}
+              </span>
+              {useMusePrediction && predictedEmotion && (
+                <p className="mt-2 text-sm text-white/80">
+                  🧠 Live from Muse
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Manual Override Toggle */}
+          <div className="flex flex-col gap-4 w-full max-w-xs">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="use-muse"
+                checked={useMusePrediction}
+                onChange={(e) => setUseMusePrediction(e.target.checked)}
+                disabled={!predictedEmotion}
+                className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
+              />
+              <label
+                htmlFor="use-muse"
+                className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
+              >
+                Use Muse Prediction
+                {predictedEmotion && ` (${predictedEmotion})`}
+              </label>
+            </div>
+
+            {/* Manual Dropdown */}
+            <div className="flex flex-col gap-2">
+              <label
+                htmlFor="emotion-select"
+                className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
+              >
+                Manual Override
+              </label>
+              <select
+                id="emotion-select"
+                value={selectedEmotion}
+                onChange={(e) => {
+                  setSelectedEmotion(e.target.value);
+                  setUseMusePrediction(false);
+                }}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-base text-black focus:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:focus:border-zinc-500 dark:focus:ring-zinc-800"
+              >
+                {emotions.map((emotion) => (
+                  <option key={emotion.name} value={emotion.name}>
+                    {emotion.name.charAt(0).toUpperCase() + emotion.name.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Side - Spotify Player */}
+        <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
+          <Player emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
+        </div>
+      </main>
+    </div>
+  );
+}

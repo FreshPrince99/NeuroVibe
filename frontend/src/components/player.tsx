@@ -21,73 +21,64 @@ export default function Player({ emotion }: PlayerProps) {
   const [deviceId, setDeviceId] = useState<string>("");
   const [accessToken, setAccessToken] = useState<string>("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isClient, setIsClient] = useState(false);
 
-  // Fetch access token from localStorage
+  // Mark when client-side is ready
   useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  // Fetch access token from localStorage (only on client)
+  useEffect(() => {
+    if (!isClient) return;
+    
     const token = localStorage.getItem("spotify_access_token");
-    console.log("Token from localStorage:", !!token);
+    console.log("🔍 Checking for Spotify token in localStorage...");
+    console.log("Token exists:", !!token);
     
     if (token) {
+      console.log("✓ Token found, length:", token.length);
+      console.log("Token preview:", token.substring(0, 30) + "...");
       setAccessToken(token);
       setIsAuthenticated(true);
     } else {
+      console.log("✗ No Spotify token found in localStorage");
+      console.log("User needs to authenticate with Spotify first");
       setIsAuthenticated(false);
     }
-  }, []);
-
-  // Store token after redirect from Spotify
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('auth') === 'success') {
-      const accessToken = urlParams.get('access_token');
-      const refreshToken = urlParams.get('refresh_token');
-      const expiresIn = urlParams.get('expires_in');
-      
-      if (accessToken) {
-        console.log("Storing token in localStorage");
-        localStorage.setItem("spotify_access_token", accessToken);
-        if (refreshToken) {
-          localStorage.setItem("spotify_refresh_token", refreshToken);
-        }
-        if (expiresIn) {
-          const expiryTime = Date.now() + parseInt(expiresIn) * 1000;
-          localStorage.setItem("spotify_token_expiry", expiryTime.toString());
-        }
-        
-        setAccessToken(accessToken);
-        setIsAuthenticated(true);
-        
-        // Clean up URL
-        window.history.replaceState({}, '', '/');
-      }
-    }
-  }, []);
+  }, [isClient]);
 
   // Initialize Spotify Web Playback SDK
   useEffect(() => {
-    if (!accessToken) return;
+    if (!accessToken || !isClient) {
+      console.log("Waiting for access token or client ready...");
+      return;
+    }
 
+    console.log("Initializing Spotify Web Playback SDK...");
     const script = document.createElement("script");
     script.src = "https://sdk.scdn.co/spotify-player.js";
     script.async = true;
     document.body.appendChild(script);
 
     window.onSpotifyWebPlaybackSDKReady = () => {
+      console.log("Spotify SDK Ready, creating player...");
       const spotifyPlayer = new window.Spotify.Player({
         name: "NeuroVibe Player",
         getOAuthToken: (cb: (token: string) => void) => {
+          console.log("SDK requesting OAuth token...");
           cb(accessToken);
         },
         volume: 0.5,
       });
 
       spotifyPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
-        console.log("Ready with Device ID", device_id);
+        console.log("✓ Spotify Player Ready with Device ID:", device_id);
         setDeviceId(device_id);
       });
 
       spotifyPlayer.addListener("not_ready", ({ device_id }: { device_id: string }) => {
-        console.log("Device ID has gone offline", device_id);
+        console.log("✗ Device ID has gone offline:", device_id);
       });
 
       spotifyPlayer.addListener("player_state_changed", (state: any) => {
@@ -105,26 +96,33 @@ export default function Player({ emotion }: PlayerProps) {
       });
 
       spotifyPlayer.addListener("initialization_error", ({ message }: { message: string }) => {
-        console.error("Initialization error:", message);
+        console.error("❌ Initialization error:", message);
       });
 
       spotifyPlayer.addListener("authentication_error", ({ message }: { message: string }) => {
-        console.error("Authentication error:", message);
+        console.error("❌ Authentication error:", message);
+        console.error("Current access token exists:", !!accessToken);
+        console.error("Token preview:", accessToken ? accessToken.substring(0, 20) + "..." : "none");
       });
 
       spotifyPlayer.addListener("account_error", ({ message }: { message: string }) => {
-        console.error("Account error:", message);
+        console.error("❌ Account error:", message);
+        console.error("Note: Spotify Premium is required for Web Playback SDK");
       });
 
       spotifyPlayer.addListener("playback_error", ({ message }: { message: string }) => {
-        console.error("Playback error:", message);
+        console.error("❌ Playback error:", message);
       });
 
       spotifyPlayer.connect().then((success: boolean) => {
         if (success) {
-          console.log("The Web Playback SDK successfully connected to Spotify!");
+          console.log("✓ The Web Playback SDK successfully connected to Spotify!");
         } else {
-          console.error("The Web Playback SDK could not connect to Spotify");
+          console.error("✗ The Web Playback SDK could not connect to Spotify");
+          console.error("This might be due to:");
+          console.error("1. Invalid or expired access token");
+          console.error("2. No Spotify Premium account");
+          console.error("3. Network connectivity issues");
         }
       });
 
@@ -136,7 +134,7 @@ export default function Player({ emotion }: PlayerProps) {
         player.disconnect();
       }
     };
-  }, [accessToken]);
+  }, [accessToken, isClient]);
 
   // Search and play music based on emotion
   useEffect(() => {

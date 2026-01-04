@@ -126,6 +126,10 @@ def handle_eeg_sample(data):
                     # Make prediction
                     emotion = predictor.predict(features)
                     
+                    # Save timestamp and buffer size before clearing
+                    last_timestamp = eeg_buffer[-1]['timestamp'] if eeg_buffer else 0
+                    buffer_size = len(eeg_buffer)
+                    
                     # Print clean summary
                     print("\n" + "="*60)
                     print(f"🧠 EMOTION: {emotion.upper()}")
@@ -139,8 +143,8 @@ def handle_eeg_sample(data):
                     # Send prediction back to client
                     emit('emotion_prediction', {
                         'emotion': emotion,
-                        'timestamp': eeg_buffer[-1]['timestamp'],
-                        'samples_processed': len(eeg_buffer)
+                        'timestamp': last_timestamp,
+                        'samples_processed': buffer_size
                     })
                 else:
                     print("❌ Feature extraction failed - insufficient data or error\n")

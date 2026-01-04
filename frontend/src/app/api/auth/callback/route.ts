@@ -29,14 +29,15 @@ export async function GET(request: NextRequest) {
     const data = await response.json();
 
     if (data.access_token) {
-      // Encode tokens to pass via URL (will be stored in localStorage client-side)
+      // Pass tokens via URL params so client can store them
       const params = new URLSearchParams({
+        spotify: 'success',
         access_token: data.access_token,
-        refresh_token: data.refresh_token || "",
+        refresh_token: data.refresh_token || '',
         expires_in: data.expires_in.toString(),
       });
       
-      return NextResponse.redirect(new URL(`/?auth=success&${params.toString()}`, request.url));
+      return NextResponse.redirect(new URL(`/setup?${params.toString()}`, request.url));
     }
 
     return NextResponse.redirect(new URL(`/?error=${data.error || 'token_error'}`, request.url));

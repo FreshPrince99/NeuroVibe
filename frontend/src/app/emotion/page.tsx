@@ -6,6 +6,14 @@ import { MuseClient, zipSamples } from 'muse-js';
 import { io, Socket } from 'socket.io-client';
 import EmotionView from "@/components/EmotionView";
 
+interface EEGData {
+  tp9: number;
+  af7: number;
+  af8: number;
+  tp10: number;
+  timestamp: number;
+}
+
 export default function EmotionPage() {
   const router = useRouter();
   const [predictedEmotion, setPredictedEmotion] = useState<string>("");
@@ -14,6 +22,7 @@ export default function EmotionPage() {
   const [isConnected, setIsConnected] = useState(false);
   const [needsReconnect, setNeedsReconnect] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
   
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -74,10 +83,21 @@ export default function EmotionPage() {
   useEffect(() => {
     // Check if Muse was connected on setup page
     const museConnected = localStorage.getItem('neurovibe_muse_connected');
+    const justCompletedSetup = sessionStorage.getItem('neurovibe_just_setup');
+    
     if (museConnected === 'true') {
-      // Show reconnect prompt since Web Bluetooth connections don't persist across page navigation
-      setNeedsReconnect(true);
-      setConnectionStatus('Click "Reconnect Muse" to start streaming');
+      if (justCompletedSetup === 'true') {
+        // Just came from setup - show reconnect prompt
+        // Can't auto-connect due to Web Bluetooth security - requires user gesture
+        console.log('Setup completed, waiting for user to reconnect Muse...');
+        sessionStorage.removeItem('neurovibe_just_setup');
+        setNeedsReconnect(true);
+        setConnectionStatus('Click "Reconnect Muse" to start streaming');
+      } else {
+        // Returning to page - show manual reconnect prompt
+        setNeedsReconnect(true);
+        setConnectionStatus('Click "Reconnect Muse" to start streaming');
+      }
     }
   }, []);
 
@@ -86,6 +106,15 @@ export default function EmotionPage() {
     setConnectionStatus('Connecting to Muse...');
     
     try {
+      // Clear any existing connection
+      if (clientRef.current) {
+        try {
+          clientRef.current.disconnect();
+        } catch (e) {
+          // Ignore disconnect errors
+        }
+      }
+      
       clientRef.current = new MuseClient();
       await clientRef.current.connect();
       await clientRef.current.start();
@@ -95,16 +124,27 @@ export default function EmotionPage() {
       setIsConnecting(false);
       setConnectionStatus('Muse connected - streaming data');
       
+      // Ensure WebSocket is connected
+      if (!socketRef.current?.connected) {
+        socketRef.current?.connect();
+      }
+      
       // Subscribe to EEG data
       let localSampleCount = 0;
       zipSamples(clientRef.current.eegReadings).subscribe(reading => {
-        const eegData = {
+        const eegData: EEGData = {
           tp9: reading.data[0],
           af7: reading.data[1],
           af8: reading.data[2],
           tp10: reading.data[3],
           timestamp: reading.timestamp
         };
+        
+        // Update visualization buffer (keep last 512 samples for display)
+        setEegDataBuffer(prev => {
+          const updated = [...prev, eegData];
+          return updated.slice(-512); // Keep only last 512 samples
+        });
         
         // Send to backend via WebSocket
         if (socketRef.current?.connected) {
@@ -122,8 +162,10 @@ export default function EmotionPage() {
       
       if (error.name === 'NotFoundError' || error.message?.includes('cancel')) {
         setConnectionStatus('Connection cancelled - click to retry');
+      } else if (error.name === 'NotAllowedError') {
+        setConnectionStatus('Permission denied - please allow Bluetooth access');
       } else {
-        setConnectionStatus('Connection failed - click to retry');
+        setConnectionStatus('Connection failed: ' + (error.message || 'Unknown error'));
       }
       
       setIsConnecting(false);
@@ -140,11 +182,34 @@ export default function EmotionPage() {
       socketRef.current.disconnect();
     }
     
-    // Clear localStorage
+    // Clear state
+    setEegDataBuffer([]);
+    setSampleCount(0);
+    setPredictedEmotion('');
+    
+    // Show reconnect prompt instead of navigating away
+    setIsConnected(false);
+    setNeedsReconnect(true);
+    setConnectionStatus('Disconnected - Click "Reconnect Muse" to continue');
+    
+    // Keep Muse connection flag so user doesn't have to go through setup again
+    // Only clear it if user explicitly wants to start over
+  };
+
+  const handleExitToHome = () => {
+    // Disconnect everything
+    if (clientRef.current) {
+      clientRef.current.disconnect();
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+    
+    // Clear all localStorage
     localStorage.removeItem('neurovibe_muse_connected');
     localStorage.removeItem('neurovibe_awaiting_spotify');
     
-    // Navigate back to landing page
+    // Navigate to landing page
     router.push('/');
   };
 
@@ -158,6 +223,8 @@ export default function EmotionPage() {
       needsReconnect={needsReconnect}
       isConnecting={isConnecting}
       onReconnect={handleReconnectMuse}
+      eegData={eegDataBuffer}
+      onExitToHome={handleExitToHome}
     />
   );
 }

@@ -1,6 +1,15 @@
 'use client';
 import { useState } from 'react';
 import Player from './player';
+import EEGVisualization from './EEGVisualization';
+
+interface EEGData {
+  tp9: number;
+  af7: number;
+  af8: number;
+  tp10: number;
+  timestamp: number;
+}
 
 interface EmotionViewProps {
   predictedEmotion: string;
@@ -11,6 +20,8 @@ interface EmotionViewProps {
   needsReconnect?: boolean;
   isConnecting?: boolean;
   onReconnect?: () => void;
+  eegData?: EEGData[];
+  onExitToHome?: () => void;
 }
 
 export default function EmotionView({ 
@@ -21,7 +32,9 @@ export default function EmotionView({
   onDisconnect,
   needsReconnect = false,
   isConnecting = false,
-  onReconnect
+  onReconnect,
+  eegData = [],
+  onExitToHome
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
@@ -29,7 +42,7 @@ export default function EmotionView({
   const emotions = [
     { name: "happy", color: "bg-yellow-400" },
     { name: "sad", color: "bg-blue-500" },
-    { name: "angry", color: "bg-red-500" },
+    { name: "stressed", color: "bg-red-500" },
     { name: "relaxed", color: "bg-green-400" },
   ];
 
@@ -66,16 +79,36 @@ export default function EmotionView({
             </div>
             <button
               onClick={onDisconnect}
-              className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors text-sm font-semibold"
+              className="px-4 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition-colors text-sm font-semibold"
             >
-              Disconnect
+              Pause Session
             </button>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex flex-1 flex-col lg:flex-row">
+      <main className="flex flex-1 flex-col">
+        {/* Auto-reconnecting Loading Overlay (no user action needed) */}
+        {isConnecting && !needsReconnect && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl border border-gray-200 dark:border-gray-800">
+              <div className="flex flex-col items-center gap-4">
+                <svg className="animate-spin h-12 w-12 text-purple-500" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <h2 className="text-2xl font-bold text-black dark:text-white">
+                  Connecting to Muse...
+                </h2>
+                <p className="text-gray-600 dark:text-gray-400">
+                  {connectionStatus}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Reconnect Overlay */}
         {needsReconnect && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
@@ -104,12 +137,20 @@ export default function EmotionView({
                   'Reconnect Muse Headset'
                 )}
               </button>
+              <button
+                onClick={onExitToHome}
+                className="w-full px-8 py-4 text-lg font-semibold text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+              >
+                Exit to Home
+              </button>
             </div>
           </div>
         )}
 
-        {/* Left Side - Emotion Circle & Controls */}
-        <div className="flex flex-1 flex-col items-center justify-center gap-8 p-8">
+        {/* Top Section - Emotion Circle, Controls & Player */}
+        <div className="flex flex-1 flex-col lg:flex-row">
+          {/* Left Side - Emotion Circle & Controls */}
+          <div className="flex flex-1 flex-col items-center justify-center gap-8 p-8">
           {/* Circle */}
           <div
             className={`flex h-64 w-64 items-center justify-center rounded-full ${getCurrentColor()} transition-colors duration-500 shadow-lg`}
@@ -173,9 +214,15 @@ export default function EmotionView({
           </div>
         </div>
 
-        {/* Right Side - Spotify Player */}
-        <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
-          <Player emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
+          {/* Right Side - Spotify Player */}
+          <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
+            <Player emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
+          </div>
+        </div>
+
+        {/* Bottom Section - EEG Visualization */}
+        <div className="border-t border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950" style={{ height: '400px' }}>
+          <EEGVisualization eegData={eegData} maxDataPoints={512} />
         </div>
       </main>
     </div>

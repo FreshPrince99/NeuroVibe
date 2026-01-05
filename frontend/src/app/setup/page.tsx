@@ -88,6 +88,9 @@ export default function SetupPage() {
       // Clear flags
       localStorage.removeItem('neurovibe_awaiting_spotify');
       
+      // Set flag to indicate user just completed setup
+      sessionStorage.setItem('neurovibe_just_setup', 'true');
+      
       // Clean up URL
       window.history.replaceState({}, document.title, window.location.pathname);
       
@@ -174,6 +177,9 @@ export default function SetupPage() {
   };
 
   const handleSetupComplete = () => {
+    // Set flag to indicate user just completed setup
+    sessionStorage.setItem('neurovibe_just_setup', 'true');
+    
     // Navigate to main emotion view
     router.push('/emotion');
   };

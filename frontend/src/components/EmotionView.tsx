@@ -22,6 +22,7 @@ interface EmotionViewProps {
   onReconnect?: () => void;
   eegData?: EEGData[];
   onExitToHome?: () => void;
+  onBackToHome?: () => void;
 }
 
 export default function EmotionView({ 
@@ -34,7 +35,8 @@ export default function EmotionView({
   isConnecting = false,
   onReconnect,
   eegData = [],
-  onExitToHome
+  onExitToHome,
+  onBackToHome
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
@@ -65,9 +67,12 @@ export default function EmotionView({
       {/* Header */}
       <header className="w-full border-b border-zinc-200 bg-white py-4 dark:border-zinc-800 dark:bg-black">
         <div className="container mx-auto px-8 flex items-center justify-between">
-          <h1 className="text-3xl font-bold text-black dark:text-white">
+          <button
+            onClick={onBackToHome}
+            className="text-3xl font-bold text-black dark:text-white hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-pointer"
+          >
             NeuroVibe
-          </h1>
+          </button>
           
           {/* Status Badge */}
           <div className="flex items-center gap-4">

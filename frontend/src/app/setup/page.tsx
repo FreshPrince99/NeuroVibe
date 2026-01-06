@@ -184,6 +184,23 @@ export default function SetupPage() {
     router.push('/emotion');
   };
 
+  const handleBackToHome = () => {
+    // Clear any connections
+    if (clientRef.current) {
+      clientRef.current.disconnect();
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+    
+    // Clear localStorage
+    localStorage.removeItem('neurovibe_muse_connected');
+    localStorage.removeItem('neurovibe_awaiting_spotify');
+    
+    // Navigate to landing page
+    router.push('/');
+  };
+
   // Show loading screen after Spotify auth
   if (showLoadingScreen) {
     return (
@@ -235,6 +252,7 @@ export default function SetupPage() {
       isConnected={isConnected}
       spotifyAuthenticated={spotifyAuthenticated}
       connectionStatus={connectionStatus}
+      onBackToHome={handleBackToHome}
     />
   );
 }

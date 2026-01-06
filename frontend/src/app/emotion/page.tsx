@@ -213,6 +213,11 @@ export default function EmotionPage() {
     router.push('/');
   };
 
+  const handleBackToHome = () => {
+    // Navigate to landing page without clearing everything
+    router.push('/');
+  };
+
   return (
     <EmotionView
       predictedEmotion={predictedEmotion}
@@ -225,6 +230,7 @@ export default function EmotionPage() {
       onReconnect={handleReconnectMuse}
       eegData={eegDataBuffer}
       onExitToHome={handleExitToHome}
+      onBackToHome={handleBackToHome}
     />
   );
 }

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { MuseClient, zipSamples } from 'muse-js';
 import { io, Socket } from 'socket.io-client';
 import EmotionView from "@/components/EmotionView";
+import { PlayerRef } from "@/components/player";
 
 interface EEGData {
   tp9: number;
@@ -20,23 +21,17 @@ export default function EmotionPage() {
   const [sampleCount, setSampleCount] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState('');
   const [isConnected, setIsConnected] = useState(false);
-  const [needsReconnect, setNeedsReconnect] = useState(false);
+  const [needsConnect, setNeedsConnect] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
   
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const playerRef = useRef<PlayerRef>(null);
 
   // Initialize WebSocket connection
   useEffect(() => {
-    // Check if user has completed setup
-    const museConnected = localStorage.getItem('neurovibe_muse_connected');
-    if (museConnected !== 'true') {
-      // Redirect to setup if not connected
-      router.push('/setup');
-      return;
-    }
-
     socketRef.current = io('http://localhost:5000', {
       transports: ['websocket'],
       autoConnect: true,
@@ -79,29 +74,24 @@ export default function EmotionPage() {
     };
   }, [router]);
 
-  // Prompt user to reconnect Muse
+  // Prompt user to connect Muse (always show on page load)
   useEffect(() => {
-    // Check if Muse was connected on setup page
-    const museConnected = localStorage.getItem('neurovibe_muse_connected');
     const justCompletedSetup = sessionStorage.getItem('neurovibe_just_setup');
     
-    if (museConnected === 'true') {
-      if (justCompletedSetup === 'true') {
-        // Just came from setup - show reconnect prompt
-        // Can't auto-connect due to Web Bluetooth security - requires user gesture
-        console.log('Setup completed, waiting for user to reconnect Muse...');
-        sessionStorage.removeItem('neurovibe_just_setup');
-        setNeedsReconnect(true);
-        setConnectionStatus('Click "Reconnect Muse" to start streaming');
-      } else {
-        // Returning to page - show manual reconnect prompt
-        setNeedsReconnect(true);
-        setConnectionStatus('Click "Reconnect Muse" to start streaming');
-      }
+    if (justCompletedSetup === 'true') {
+      // Just came from setup - show connect prompt
+      console.log('Setup completed, waiting for user to connect Muse...');
+      sessionStorage.removeItem('neurovibe_just_setup');
+      setNeedsConnect(true);
+      setConnectionStatus('Click "Connect Muse Headset" to start');
+    } else {
+      // Always prompt for connection on page load
+      setNeedsConnect(true);
+      setConnectionStatus('Click "Connect Muse Headset" to start');
     }
   }, []);
 
-  const handleReconnectMuse = async () => {
+  const handleConnectMuse = async () => {
     setIsConnecting(true);
     setConnectionStatus('Connecting to Muse...');
     
@@ -120,7 +110,8 @@ export default function EmotionPage() {
       await clientRef.current.start();
       
       setIsConnected(true);
-      setNeedsReconnect(false);
+      setNeedsConnect(false);
+      setIsPaused(false);
       setIsConnecting(false);
       setConnectionStatus('Muse connected - streaming data');
       
@@ -170,33 +161,31 @@ export default function EmotionPage() {
       
       setIsConnecting(false);
       setIsConnected(false);
-      setNeedsReconnect(true);
+      setNeedsConnect(true);
     }
   };
 
-  const handleDisconnect = () => {
-    if (clientRef.current) {
-      clientRef.current.disconnect();
+  const handlePauseToggle = () => {
+    if (isPaused) {
+      // Resume - reconnect
+      handleConnectMuse();
+    } else {
+      // Pause - disconnect but don't show popup
+      if (clientRef.current) {
+        clientRef.current.disconnect();
+      }
+      setIsPaused(true);
+      setIsConnected(false);
+      setConnectionStatus('Paused - Click "Resume" to continue');
     }
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-    }
-    
-    // Clear state
-    setEegDataBuffer([]);
-    setSampleCount(0);
-    setPredictedEmotion('');
-    
-    // Show reconnect prompt instead of navigating away
-    setIsConnected(false);
-    setNeedsReconnect(true);
-    setConnectionStatus('Disconnected - Click "Reconnect Muse" to continue');
-    
-    // Keep Muse connection flag so user doesn't have to go through setup again
-    // Only clear it if user explicitly wants to start over
   };
 
   const handleExitToHome = () => {
+    // Pause music
+    if (playerRef.current) {
+      playerRef.current.pause();
+    }
+    
     // Disconnect everything
     if (clientRef.current) {
       clientRef.current.disconnect();
@@ -214,6 +203,11 @@ export default function EmotionPage() {
   };
 
   const handleBackToHome = () => {
+    // Pause music
+    if (playerRef.current) {
+      playerRef.current.pause();
+    }
+    
     // Navigate to landing page without clearing everything
     router.push('/');
   };
@@ -224,13 +218,15 @@ export default function EmotionPage() {
       isUsingMusePrediction={true}
       sampleCount={sampleCount}
       connectionStatus={connectionStatus}
-      onDisconnect={handleDisconnect}
-      needsReconnect={needsReconnect}
+      onPauseToggle={handlePauseToggle}
+      isPaused={isPaused}
+      needsConnect={needsConnect}
       isConnecting={isConnecting}
-      onReconnect={handleReconnectMuse}
+      onConnect={handleConnectMuse}
       eegData={eegDataBuffer}
       onExitToHome={handleExitToHome}
       onBackToHome={handleBackToHome}
+      playerRef={playerRef}
     />
   );
 }

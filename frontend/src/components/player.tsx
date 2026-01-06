@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, forwardRef, useImperativeHandle } from "react";
 
 interface Track {
   name: string;
@@ -14,7 +14,11 @@ interface PlayerProps {
   emotion: string;
 }
 
-export default function Player({ emotion }: PlayerProps) {
+export interface PlayerRef {
+  pause: () => void;
+}
+
+const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [player, setPlayer] = useState<any>(null);
@@ -27,6 +31,15 @@ export default function Player({ emotion }: PlayerProps) {
   useEffect(() => {
     setIsClient(true);
   }, []);
+
+  // Expose pause method to parent
+  useImperativeHandle(ref, () => ({
+    pause: () => {
+      if (player && isPlaying) {
+        player.pause();
+      }
+    }
+  }));
 
   // Fetch access token from localStorage (only on client)
   useEffect(() => {
@@ -333,4 +346,8 @@ export default function Player({ emotion }: PlayerProps) {
       </button>
     </div>
   );
-}
+});
+
+Player.displayName = 'Player';
+
+export default Player;

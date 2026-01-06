@@ -1,6 +1,6 @@
 'use client';
-import { useState } from 'react';
-import Player from './player';
+import { useState, useRef } from 'react';
+import Player, { PlayerRef } from './player';
 import EEGVisualization from './EEGVisualization';
 
 interface EEGData {
@@ -16,13 +16,15 @@ interface EmotionViewProps {
   isUsingMusePrediction: boolean;
   sampleCount: number;
   connectionStatus: string;
-  onDisconnect: () => void;
-  needsReconnect?: boolean;
+  onPauseToggle: () => void;
+  isPaused: boolean;
+  needsConnect?: boolean;
   isConnecting?: boolean;
-  onReconnect?: () => void;
+  onConnect?: () => void;
   eegData?: EEGData[];
   onExitToHome?: () => void;
   onBackToHome?: () => void;
+  playerRef?: React.RefObject<PlayerRef | null>;
 }
 
 export default function EmotionView({ 
@@ -30,13 +32,15 @@ export default function EmotionView({
   isUsingMusePrediction,
   sampleCount,
   connectionStatus,
-  onDisconnect,
-  needsReconnect = false,
+  onPauseToggle,
+  isPaused,
+  needsConnect = false,
   isConnecting = false,
-  onReconnect,
+  onConnect,
   eegData = [],
   onExitToHome,
-  onBackToHome
+  onBackToHome,
+  playerRef
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
@@ -83,10 +87,14 @@ export default function EmotionView({
               {connectionStatus || 'Connected'}
             </div>
             <button
-              onClick={onDisconnect}
-              className="px-4 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 transition-colors text-sm font-semibold"
+              onClick={onPauseToggle}
+              className={`px-4 py-2 rounded-lg transition-colors text-sm font-semibold ${
+                isPaused 
+                  ? 'bg-green-500 text-white hover:bg-green-600'
+                  : 'bg-orange-500 text-white hover:bg-orange-600'
+              }`}
             >
-              Pause Session
+              {isPaused ? 'Resume' : 'Pause'}
             </button>
           </div>
         </div>
@@ -94,8 +102,8 @@ export default function EmotionView({
 
       {/* Main Content */}
       <main className="flex flex-1 flex-col">
-        {/* Auto-reconnecting Loading Overlay (no user action needed) */}
-        {isConnecting && !needsReconnect && (
+        {/* Auto-connecting Loading Overlay (no user action needed) */}
+        {isConnecting && !needsConnect && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
             <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl border border-gray-200 dark:border-gray-800">
               <div className="flex flex-col items-center gap-4">
@@ -114,19 +122,19 @@ export default function EmotionView({
           </div>
         )}
 
-        {/* Reconnect Overlay */}
-        {needsReconnect && (
+        {/* Connect Overlay */}
+        {needsConnect && (
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
             <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl border border-gray-200 dark:border-gray-800">
               <div className="text-6xl mb-4">📡</div>
               <h2 className="text-2xl font-bold mb-4 text-black dark:text-white">
-                Reconnect Your Muse Headset
+                Connect Your Muse Headset
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Web Bluetooth connections don't persist across pages. Click below to reconnect and start streaming EEG data.
+                Click below to select your Muse device and start streaming EEG data for emotion detection.
               </p>
               <button
-                onClick={onReconnect}
+                onClick={onConnect}
                 disabled={isConnecting}
                 className="w-full px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-blue-500 to-purple-500 rounded-full hover:shadow-2xl hover:shadow-purple-500/50 transition-all duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
               >
@@ -139,7 +147,7 @@ export default function EmotionView({
                     Connecting...
                   </span>
                 ) : (
-                  'Reconnect Muse Headset'
+                  'Connect Muse Headset'
                 )}
               </button>
               <button
@@ -221,7 +229,7 @@ export default function EmotionView({
 
           {/* Right Side - Spotify Player */}
           <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
-            <Player emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
+            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
           </div>
         </div>
 

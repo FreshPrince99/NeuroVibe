@@ -1,47 +1,31 @@
 'use client';
 import { useState } from 'react';
 import Image from 'next/image';
-import { Brain, Bluetooth, Music, CheckCircle2, ArrowRight, ArrowLeft } from 'lucide-react';
+import { Music, CheckCircle2, ArrowRight, ArrowLeft } from 'lucide-react';
 import museImage from '@/assets/muse.jpg';
-import pairImage from '@/assets/pair.png';
 
 interface SetupGuideProps {
-  onConnect: () => Promise<void>;
   onSpotifyAuth: () => void;
   onComplete: () => void;
-  isConnecting: boolean;
-  isConnected: boolean;
   spotifyAuthenticated: boolean;
-  connectionStatus: string;
   onBackToHome?: () => void;
 }
 
 export default function SetupGuide({ 
-  onConnect, 
   onSpotifyAuth,
   onComplete,
-  isConnecting, 
-  isConnected,
   spotifyAuthenticated,
-  connectionStatus,
   onBackToHome 
 }: SetupGuideProps) {
   const [currentStep, setCurrentStep] = useState(1);
 
   const handleNext = async () => {
     if (currentStep === 1) {
-      setCurrentStep(2);
-    } else if (currentStep === 2) {
-      if (!isConnected) {
-        await onConnect();
-      }
-      if (isConnected) {
-        setCurrentStep(3);
-      }
-    } else if (currentStep === 3) {
       if (spotifyAuthenticated) {
-        onComplete();
+        setCurrentStep(2);
       }
+    } else if (currentStep === 2) {
+      onComplete();
     }
   };
 
@@ -52,9 +36,8 @@ export default function SetupGuide({
   };
 
   const canProceed = () => {
-    if (currentStep === 1) return true;
-    if (currentStep === 2) return isConnected;
-    if (currentStep === 3) return spotifyAuthenticated;
+    if (currentStep === 1) return spotifyAuthenticated;
+    if (currentStep === 2) return true;
     return false;
   };
 
@@ -88,9 +71,8 @@ export default function SetupGuide({
         <div className="mb-16">
           <div className="flex items-center justify-center gap-2">
             {[
-              { step: 1, label: 'Power On', icon: Brain },
-              { step: 2, label: 'Connect Muse', icon: Bluetooth },
-              { step: 3, label: 'Spotify', icon: Music }
+              { step: 1, label: 'Connect Spotify', icon: Music },
+              { step: 2, label: 'Prepare Muse', icon: CheckCircle2 }
             ].map(({ step, label, icon: Icon }, index) => (
               <div key={step} className="flex items-center">
                 <div className="flex flex-col items-center gap-2">
@@ -109,7 +91,7 @@ export default function SetupGuide({
                     {label}
                   </span>
                 </div>
-                {index < 2 && (
+                {index < 1 && (
                   <div className={`w-20 h-px mx-4 transition-all duration-500 ${
                     step < currentStep ? 'bg-purple-500' : 'bg-gray-800'
                   }`}></div>
@@ -121,8 +103,46 @@ export default function SetupGuide({
 
         {/* Step Content */}
         <div className="border border-gray-800 rounded-3xl p-8 md:p-12 min-h-[500px] flex flex-col justify-between backdrop-blur-sm bg-gray-950/50">
-          {/* Step 1: Power On Instructions */}
+          {/* Step 1: Connect Spotify */}
           {currentStep === 1 && (
+            <div className="text-center space-y-8">
+              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center">
+                <Music className="w-10 h-10 text-white" strokeWidth={1.5} />
+              </div>
+              <h2 className="text-4xl md:text-5xl font-light tracking-tight">Connect Spotify</h2>
+              <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
+                Authenticate with Spotify to enable personalized music recommendations based on your emotions.
+              </p>
+
+              {!spotifyAuthenticated && (
+                <button
+                  onClick={onSpotifyAuth}
+                  className="group relative flex items-center gap-3 px-10 py-4 mx-auto text-base font-light tracking-wide text-white bg-gradient-to-r from-green-500 to-green-600 rounded-full hover:shadow-2xl hover:shadow-green-500/30 transition-all duration-500 transform hover:scale-105"
+                >
+                  <Music className="w-5 h-5" strokeWidth={1.5} />
+                  <span>Connect Spotify</span>
+                  <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
+                </button>
+              )}
+
+              {spotifyAuthenticated && (
+                <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-8 max-w-lg mx-auto">
+                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/20 flex items-center justify-center">
+                    <CheckCircle2 className="w-8 h-8 text-green-400" strokeWidth={1.5} />
+                  </div>
+                  <h3 className="text-2xl font-light text-white mb-2">Spotify Connected</h3>
+                  <p className="text-gray-400 font-light">Ready to set up your Muse headset</p>
+                </div>
+              )}
+
+              <div className="mt-8 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 max-w-lg mx-auto">
+                <p className="text-sm text-blue-400/80 font-light">💡 A Spotify Premium account is recommended for the best experience</p>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Muse Setup Instructions */}
+          {currentStep === 2 && (
             <div className="text-center space-y-8">
               <div className="mb-8 rounded-2xl overflow-hidden max-w-lg mx-auto border border-gray-800">
                 <Image 
@@ -163,123 +183,10 @@ export default function SetupGuide({
               <div className="mt-8 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 max-w-lg mx-auto">
                 <p className="text-sm text-blue-400/80 font-light">💡 Make sure your headset isn't connected to any other device</p>
               </div>
-            </div>
-          )}
-
-          {/* Step 2: Connect Muse */}
-          {currentStep === 2 && (
-            <div className="text-center space-y-8">
-              <div className="mb-8 rounded-2xl overflow-hidden max-w-lg mx-auto border border-gray-800">
-                <Image 
-                  src={pairImage} 
-                  alt="Bluetooth Pairing" 
-                  width={500}
-                  height={350}
-                  className="w-full h-auto object-cover"
-                />
-              </div>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight">Connect Your Headset</h2>
-              <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
-                Select your Muse device from the Bluetooth pairing dialog.
-              </p>
-              
-              {!isConnected && !isConnecting && (
-                <button
-                  onClick={onConnect}
-                  className="group relative flex items-center gap-3 px-10 py-4 mx-auto text-base font-light tracking-wide text-black bg-white rounded-full hover:shadow-2xl hover:shadow-white/20 transition-all duration-500 transform hover:scale-105"
-                >
-                  <Bluetooth className="w-5 h-5" strokeWidth={1.5} />
-                  <span>Open Device Selector</span>
-                  <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
-                </button>
-              )}
-
-              {isConnecting && (
-                <div className="flex flex-col items-center gap-6 py-8">
-                  <div className="relative">
-                    <div className="w-16 h-16 rounded-full border-2 border-gray-800"></div>
-                    <div className="absolute inset-0 w-16 h-16 rounded-full border-2 border-t-white border-r-white border-b-transparent border-l-transparent animate-spin"></div>
-                  </div>
-                  <p className="text-lg text-gray-400 font-light">Connecting to Muse...</p>
-                </div>
-              )}
-
-              {isConnected && (
-                <div className="bg-purple-500/10 border border-purple-500/30 rounded-2xl p-8 max-w-lg mx-auto">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-purple-500/20 flex items-center justify-center">
-                    <CheckCircle2 className="w-8 h-8 text-purple-400" strokeWidth={1.5} />
-                  </div>
-                  <h3 className="text-2xl font-light text-white mb-2">Successfully Connected</h3>
-                  <p className="text-gray-400 font-light">Your Muse headset is now streaming data</p>
-                </div>
-              )}
-
-              {connectionStatus && (
-                <div className={`mt-6 p-4 rounded-xl max-w-lg mx-auto ${
-                  connectionStatus.includes('failed') || connectionStatus.includes('cancelled')
-                    ? 'bg-red-500/5 border border-red-500/20 text-red-400'
-                    : connectionStatus.includes('success')
-                    ? 'bg-green-500/5 border border-green-500/20 text-green-400'
-                    : 'bg-blue-500/5 border border-blue-500/20 text-blue-400'
-                }`}>
-                  <p className="text-sm font-light">{connectionStatus}</p>
-                </div>
-              )}
-
-              <div className="mt-8 bg-gray-900/50 border border-gray-800 rounded-xl p-4 max-w-lg mx-auto">
-                <p className="text-sm text-gray-500 font-light">
-                  Look for a device starting with <span className="text-gray-300">"Muse"</span> in the Bluetooth list
+              <div className="mt-6 bg-gray-900/50 border border-gray-800 rounded-xl p-4 max-w-lg mx-auto">
+                <p className="text-sm text-gray-400 font-light">
+                  Note: You'll connect your Muse headset on the next page where it will be actively used.
                 </p>
-              </div>
-            </div>
-          )}
-
-          {/* Step 3: Spotify Auth */}
-          {currentStep === 3 && (
-            <div className="text-center space-y-8">
-              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center">
-                <Music className="w-10 h-10 text-white" strokeWidth={1.5} />
-              </div>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight">Connect Spotify</h2>
-              <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
-                Authenticate with Spotify to enable personalized music recommendations.
-              </p>
-
-              <div className="bg-purple-500/10 border border-purple-500/30 rounded-2xl p-6 max-w-lg mx-auto">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle2 className="w-6 h-6 text-purple-400" strokeWidth={1.5} />
-                  </div>
-                  <div className="flex-1 text-left">
-                    <h3 className="font-light mb-1 text-white">Muse Connected</h3>
-                    <p className="text-sm text-gray-400 font-light">Streaming EEG data successfully</p>
-                  </div>
-                </div>
-              </div>
-
-              {!spotifyAuthenticated && (
-                <button
-                  onClick={onSpotifyAuth}
-                  className="group relative flex items-center gap-3 px-10 py-4 mx-auto text-base font-light tracking-wide text-white bg-gradient-to-r from-green-500 to-green-600 rounded-full hover:shadow-2xl hover:shadow-green-500/30 transition-all duration-500 transform hover:scale-105"
-                >
-                  <Music className="w-5 h-5" strokeWidth={1.5} />
-                  <span>Connect Spotify</span>
-                  <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
-                </button>
-              )}
-
-              {spotifyAuthenticated && (
-                <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-8 max-w-lg mx-auto">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/20 flex items-center justify-center">
-                    <CheckCircle2 className="w-8 h-8 text-green-400" strokeWidth={1.5} />
-                  </div>
-                  <h3 className="text-2xl font-light text-white mb-2">Spotify Connected</h3>
-                  <p className="text-gray-400 font-light">You're all set to start listening</p>
-                </div>
-              )}
-
-              <div className="mt-8 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 max-w-lg mx-auto">
-                <p className="text-sm text-blue-400/80 font-light">💡 A Spotify Premium account is recommended for the best experience</p>
               </div>
             </div>
           )}
@@ -302,16 +209,16 @@ export default function SetupGuide({
 
           <button
             onClick={handleNext}
-            disabled={!canProceed() || isConnecting}
+            disabled={!canProceed()}
             className={`group flex items-center gap-2 px-8 py-3 rounded-full font-light tracking-wide transition-all duration-500 ${
-              !canProceed() || isConnecting
+              !canProceed()
                 ? 'bg-gray-900 text-gray-700 cursor-not-allowed border border-gray-800'
-                : currentStep === 3
+                : currentStep === 2
                 ? 'bg-gradient-to-r from-green-500 to-blue-500 text-white hover:shadow-xl hover:shadow-green-500/30 transform hover:scale-105'
                 : 'bg-white text-black hover:shadow-xl hover:shadow-white/20 transform hover:scale-105'
             }`}
           >
-            <span>{currentStep === 3 ? 'Start Listening' : 'Next'}</span>
+            <span>{currentStep === 2 ? 'Start Listening' : 'Next'}</span>
             <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
           </button>
         </div>

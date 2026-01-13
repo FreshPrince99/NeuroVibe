@@ -31,6 +31,7 @@ class CNNEmotionPredictor:
     - Average reference
     - IIR Butterworth band-pass filter 0.5-45 Hz (order=4)
     - PSD via Welch (n_fft=512, fmin=0.5, fmax=45)
+    - Optional log10 + per-channel z-score normalization (to stabilize inputs)
     - Input shape: (1, 4, 90, 1)
     """
 
@@ -40,6 +41,8 @@ class CNNEmotionPredictor:
         sample_rate: int = 256,
         window_seconds: int = 60,
         microvolts_to_volts: float = 1e-6,
+        log_psd: bool = True,
+        zscore_psd: bool = True,
         n_fft: int = 512,
         fmin: float = 0.5,
         fmax: float = 45.0,
@@ -47,6 +50,8 @@ class CNNEmotionPredictor:
         self.sample_rate = sample_rate
         self.window_seconds = window_seconds
         self.microvolts_to_volts = microvolts_to_volts
+        self.log_psd = log_psd
+        self.zscore_psd = zscore_psd
         self.n_fft = n_fft
         self.fmin = fmin
         self.fmax = fmax
@@ -109,6 +114,12 @@ class CNNEmotionPredictor:
             verbose=False,
         )
         features = psd.get_data()[0]
+        if self.log_psd:
+            features = np.log10(features + 1e-12)
+        if self.zscore_psd:
+            mean = features.mean(axis=1, keepdims=True)
+            std = features.std(axis=1, keepdims=True) + 1e-8
+            features = (features - mean) / std
         model_input = np.expand_dims(features, axis=0)
         model_input = np.expand_dims(model_input, axis=-1)
         return model_input

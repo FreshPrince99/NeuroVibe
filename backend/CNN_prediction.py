@@ -27,6 +27,7 @@ class CNNEmotionPredictor:
 
     The preprocessing mirrors training:
     - Channels: AF7, TP9, TP10, AF8
+    - Convert microvolts to volts (MNE expects volts)
     - Average reference
     - IIR Butterworth band-pass filter 0.5-45 Hz (order=4)
     - PSD via Welch (n_fft=512, fmin=0.5, fmax=45)
@@ -38,12 +39,14 @@ class CNNEmotionPredictor:
         model_path: str = "models/eeg_emotion_prediction_model.keras",
         sample_rate: int = 256,
         window_seconds: int = 60,
+        microvolts_to_volts: float = 1e-6,
         n_fft: int = 512,
         fmin: float = 0.5,
         fmax: float = 45.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.window_seconds = window_seconds
+        self.microvolts_to_volts = microvolts_to_volts
         self.n_fft = n_fft
         self.fmin = fmin
         self.fmax = fmax
@@ -150,6 +153,7 @@ class CNNEmotionPredictor:
             eeg_samples["af8"],
         ]
         eeg_segment = np.stack(ordered_channels, axis=0).astype(np.float64)
+        eeg_segment *= self.microvolts_to_volts
         model_input = self._compute_psd_features(eeg_segment)
 
         raw_prediction = self.model.predict(model_input, verbose=0)[0]

@@ -31,7 +31,7 @@ class CNNEmotionPredictor:
     - Average reference
     - IIR Butterworth band-pass filter 0.5-45 Hz (order=4)
     - PSD via Welch (n_fft=512, fmin=0.5, fmax=45)
-    - Optional log10 + per-channel z-score normalization (to stabilize inputs)
+    - Optional log10 + per-channel z-score normalization (disabled by default)
     - Input shape: (1, 4, 90, 1)
     """
 
@@ -41,8 +41,8 @@ class CNNEmotionPredictor:
         sample_rate: int = 256,
         window_seconds: int = 60,
         microvolts_to_volts: float = 1e-6,
-        log_psd: bool = True,
-        zscore_psd: bool = True,
+        log_psd: bool = False,
+        zscore_psd: bool = False,
         n_fft: int = 512,
         fmin: float = 0.5,
         fmax: float = 45.0,

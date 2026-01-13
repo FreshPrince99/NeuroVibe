@@ -6,7 +6,7 @@ Receives EEG samples from frontend and returns emotion predictions.
 from flask import Flask
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-from KAN_prediction import EmotionPredictor
+from CNN_prediction import CNNEmotionPredictor
 import numpy as np
 import sys
 
@@ -16,22 +16,20 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Initialize the emotion predictor
-print("Initializing EmotionPredictor...")
+print("Initializing CNNEmotionPredictor...")
 try:
-    predictor = EmotionPredictor(
-        model_path='models/mood_model.pth',
-        scaler_path='models/scaler.pkl',
-        label_encoder_path='models/label_encoder.pkl'
+    predictor = CNNEmotionPredictor(
+        model_path='models/eeg_emotion_prediction_model.keras'
     )
-    print("✓ EmotionPredictor ready!")
+    print("✓ CNNEmotionPredictor ready!")
 except Exception as e:
     print(f"❌ Failed to initialize predictor: {e}")
     sys.exit(1)
 
 # Global buffer to store EEG samples
-# We need 5 seconds of data at 256 Hz = 1280 samples
+# We need 60 seconds of data at 256 Hz = 15360 samples
 eeg_buffer = []
-BUFFER_SIZE = 1280  # 5 seconds at 256 Hz
+BUFFER_SIZE = predictor.required_samples
 SAMPLE_RATE = 256
 is_processing = False  # Flag to prevent multiple simultaneous predictions
 
@@ -91,65 +89,71 @@ def handle_eeg_sample(data):
         if len(eeg_buffer) % 256 == 0:
             print(f"📊 Received {len(eeg_buffer)}/{BUFFER_SIZE} samples ({len(eeg_buffer)/SAMPLE_RATE:.1f}s)")
         
-        # Once we have enough samples (5 seconds), make a prediction
+        # Once we have enough samples (60 seconds), make a prediction
         if len(eeg_buffer) >= BUFFER_SIZE and not is_processing:
             is_processing = True  # Set flag to prevent re-entry
             print(f"\n🔄 Buffer full with {len(eeg_buffer)} samples, processing...")
             
             try:
                 # Convert buffer to channel arrays (as numpy arrays)
-                channels_data = [
-                    np.array([sample['tp9'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
-                    np.array([sample['af7'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
-                    np.array([sample['af8'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
-                    np.array([sample['tp10'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64)
-                ]
+                channels_data = {
+                    'tp9': np.array([sample['tp9'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
+                    'af7': np.array([sample['af7'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
+                    'af8': np.array([sample['af8'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64),
+                    'tp10': np.array([sample['tp10'] for sample in eeg_buffer[:BUFFER_SIZE]], dtype=np.float64)
+                }
                 
                 # Calculate channel averages for display
                 channel_means = {
-                    'TP9': np.mean(channels_data[0]),
-                    'AF7': np.mean(channels_data[1]),
-                    'AF8': np.mean(channels_data[2]),
-                    'TP10': np.mean(channels_data[3])
+                    'TP9': np.mean(channels_data['tp9']),
+                    'AF7': np.mean(channels_data['af7']),
+                    'AF8': np.mean(channels_data['af8']),
+                    'TP10': np.mean(channels_data['tp10'])
                 }
                 
-                print(f"📈 Computing features from {channels_data[0].shape[0]} samples per channel...")
-                
-                # Compute features
-                features = predictor.compute_all_advanced_features(
-                    channels_data, 
-                    debug=False
+                print(f"📈 Computing PSD from {channels_data['tp9'].shape[0]} samples per channel...")
+
+                emotion, raw_vad, clamped_vad = predictor.predict_emotion(channels_data)
+
+                # Save timestamp and buffer size before clearing
+                last_timestamp = eeg_buffer[-1]['timestamp'] if eeg_buffer else 0
+                buffer_size = len(eeg_buffer)
+
+                # Print clean summary
+                print("\n" + "="*60)
+                print(f"🧠 EMOTION: {emotion.upper()}")
+                print("-"*60)
+                print(
+                    f"   VAD (raw): {raw_vad.valence:6.2f}, "
+                    f"{raw_vad.arousal:6.2f}, {raw_vad.dominance:6.2f}"
                 )
-                
-                if features is not None:
-                    print("✓ Features computed successfully")
-                    # Make prediction
-                    emotion = predictor.predict(features)
-                    
-                    # Save timestamp and buffer size before clearing
-                    last_timestamp = eeg_buffer[-1]['timestamp'] if eeg_buffer else 0
-                    buffer_size = len(eeg_buffer)
-                    
-                    # Print clean summary
-                    print("\n" + "="*60)
-                    print(f"🧠 EMOTION: {emotion.upper()}")
-                    print("-"*60)
-                    print(f"   TP9:  {channel_means['TP9']:8.2f} µV")
-                    print(f"   AF7:  {channel_means['AF7']:8.2f} µV")
-                    print(f"   AF8:  {channel_means['AF8']:8.2f} µV")
-                    print(f"   TP10: {channel_means['TP10']:8.2f} µV")
-                    print("="*60 + "\n")
-                    
-                    # Send prediction back to client
-                    emit('emotion_prediction', {
-                        'emotion': emotion,
-                        'timestamp': last_timestamp,
-                        'samples_processed': buffer_size
-                    })
-                else:
-                    print("❌ Feature extraction failed - insufficient data or error\n")
-                    emit('error', {'message': 'Feature extraction failed'})
-                    
+                print(
+                    f"   VAD (1-9): {clamped_vad.valence:6.2f}, "
+                    f"{clamped_vad.arousal:6.2f}, {clamped_vad.dominance:6.2f}"
+                )
+                print(f"   TP9:  {channel_means['TP9']:8.2f} µV")
+                print(f"   AF7:  {channel_means['AF7']:8.2f} µV")
+                print(f"   AF8:  {channel_means['AF8']:8.2f} µV")
+                print(f"   TP10: {channel_means['TP10']:8.2f} µV")
+                print("="*60 + "\n")
+
+                # Send prediction back to client
+                emit('emotion_prediction', {
+                    'emotion': emotion,
+                    'vad': {
+                        'valence': clamped_vad.valence,
+                        'arousal': clamped_vad.arousal,
+                        'dominance': clamped_vad.dominance
+                    },
+                    'raw_vad': {
+                        'valence': raw_vad.valence,
+                        'arousal': raw_vad.arousal,
+                        'dominance': raw_vad.dominance
+                    },
+                    'timestamp': last_timestamp,
+                    'samples_processed': buffer_size
+                })
+            
             except Exception as processing_error:
                 print(f"❌ Processing error: {processing_error}\n")
                 import traceback

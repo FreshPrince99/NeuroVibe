@@ -182,7 +182,7 @@ export default function MuseConnector({ onEmotionPredicted }: MuseConnectorProps
       <div className="text-xs text-gray-500 space-y-1">
         <p>• Make sure your Muse headset is on and nearby</p>
         <p>• Backend server must be running on localhost:5000</p>
-        <p>• Prediction updates every ~5 seconds (1280 samples)</p>
+        <p>• Prediction updates every ~60 seconds (15360 samples)</p>
       </div>
     </div>
   );

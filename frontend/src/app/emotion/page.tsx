@@ -15,9 +15,16 @@ interface EEGData {
   timestamp: number;
 }
 
+interface VADData {
+  valence: number;
+  arousal: number;
+  dominance: number;
+}
+
 export default function EmotionPage() {
   const router = useRouter();
   const [predictedEmotion, setPredictedEmotion] = useState<string>("");
+  const [predictedVAD, setPredictedVAD] = useState<VADData | null>(null);
   const [sampleCount, setSampleCount] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -41,9 +48,12 @@ export default function EmotionPage() {
     });
 
     // Listen for emotion predictions
-    socketRef.current.on('emotion_prediction', (data: { emotion: string }) => {
+    socketRef.current.on('emotion_prediction', (data: { emotion: string; vad?: VADData }) => {
       console.log('✓ Received emotion prediction:', data.emotion);
       setPredictedEmotion(data.emotion);
+      if (data.vad) {
+        setPredictedVAD(data.vad);
+      }
       setConnectionStatus('Live prediction active');
     });
 
@@ -215,6 +225,7 @@ export default function EmotionPage() {
   return (
     <EmotionView
       predictedEmotion={predictedEmotion}
+      predictedVAD={predictedVAD}
       isUsingMusePrediction={true}
       sampleCount={sampleCount}
       connectionStatus={connectionStatus}

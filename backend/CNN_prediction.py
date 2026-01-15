@@ -46,6 +46,7 @@ class CNNEmotionPredictor:
         n_fft: int = 512,
         fmin: float = 0.5,
         fmax: float = 45.0,
+        psd_scale_factor: float = 0.4,  # Empirical scaling to match training data
     ) -> None:
         self.sample_rate = sample_rate
         self.window_seconds = window_seconds
@@ -55,6 +56,7 @@ class CNNEmotionPredictor:
         self.n_fft = n_fft
         self.fmin = fmin
         self.fmax = fmax
+        self.psd_scale_factor = psd_scale_factor
 
         self.channel_order = ["AF7", "TP9", "TP10", "AF8"]
         self._info = mne.create_info(
@@ -114,6 +116,12 @@ class CNNEmotionPredictor:
             verbose=False,
         )
         features = psd.get_data()[0]
+        
+        # Apply scaling to match training data distribution
+        # Current outputs are ~2.5x too large (getting 20-24, expecting 1-9)
+        # Scale factor of 0.4 brings them into correct range
+        features = features * self.psd_scale_factor
+        
         if self.log_psd:
             features = np.log10(features + 1e-12)
         if self.zscore_psd:

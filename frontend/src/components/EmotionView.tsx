@@ -13,6 +13,11 @@ interface EEGData {
 
 interface EmotionViewProps {
   predictedEmotion: string;
+  predictedVAD?: {
+    valence: number;
+    arousal: number;
+    dominance: number;
+  } | null;
   isUsingMusePrediction: boolean;
   sampleCount: number;
   connectionStatus: string;
@@ -29,6 +34,7 @@ interface EmotionViewProps {
 
 export default function EmotionView({ 
   predictedEmotion, 
+  predictedVAD,
   isUsingMusePrediction,
   sampleCount,
   connectionStatus,
@@ -50,6 +56,16 @@ export default function EmotionView({
     { name: "sad", color: "bg-blue-500" },
     { name: "stressed", color: "bg-red-500" },
     { name: "relaxed", color: "bg-green-400" },
+    { name: "excited", color: "bg-pink-500" },
+    { name: "energized", color: "bg-orange-500" },
+    { name: "content", color: "bg-emerald-400" },
+    { name: "anxious", color: "bg-amber-600" },
+    { name: "angry", color: "bg-rose-600" },
+    { name: "bored", color: "bg-slate-500" },
+    { name: "neutral", color: "bg-gray-400" },
+    { name: "alert", color: "bg-indigo-500" },
+    { name: "calm", color: "bg-teal-400" },
+    { name: "tired", color: "bg-zinc-500" },
   ];
 
   const getCurrentColor = () => {
@@ -60,6 +76,8 @@ export default function EmotionView({
   const getDisplayEmotion = () => {
     return useMusePrediction && predictedEmotion ? predictedEmotion : selectedEmotion;
   };
+
+  const formatVAD = (value: number) => value.toFixed(2);
 
   // Update useMusePrediction when new prediction comes in
   if (predictedEmotion && !useMusePrediction && isUsingMusePrediction) {
@@ -176,6 +194,13 @@ export default function EmotionView({
                 <p className="mt-2 text-sm text-white/80">
                   🧠 Live from Muse
                 </p>
+              )}
+              {useMusePrediction && predictedVAD && (
+                <div className="mt-3 text-xs text-white/90">
+                  <div>V: {formatVAD(predictedVAD.valence)}</div>
+                  <div>A: {formatVAD(predictedVAD.arousal)}</div>
+                  <div>D: {formatVAD(predictedVAD.dominance)}</div>
+                </div>
               )}
             </div>
           </div>

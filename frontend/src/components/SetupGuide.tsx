@@ -1,7 +1,6 @@
 'use client';
 import { useState } from 'react';
 import Image from 'next/image';
-import { Music, CheckCircle2, ArrowRight, ArrowLeft } from 'lucide-react';
 import museImage from '@/assets/muse.jpg';
 
 interface SetupGuideProps {
@@ -11,22 +10,52 @@ interface SetupGuideProps {
   onBackToHome?: () => void;
 }
 
-export default function SetupGuide({ 
+type SessionMode = 'focus' | 'relaxation' | 'cognitive';
+type FocusEnergy = 'energetic' | 'calm' | '';
+
+const musicGenres = [
+  'Lo-fi',
+  'Classical',
+  'Ambient',
+  'Jazz',
+  'Instrumental',
+  'Electronic',
+  'Nature sounds',
+  'Soft pop'
+];
+
+export default function SetupGuide({
   onSpotifyAuth,
   onComplete,
   spotifyAuthenticated,
-  onBackToHome 
+  onBackToHome
 }: SetupGuideProps) {
   const [currentStep, setCurrentStep] = useState(1);
+  const [preferredGenres, setPreferredGenres] = useState<string[]>([]);
+  const [focusEnergy, setFocusEnergy] = useState<FocusEnergy>('');
+  const [selectedMode, setSelectedMode] = useState<SessionMode | ''>('');
+
+  const totalSteps = 4;
+
+  const handleGenreToggle = (genre: string) => {
+    setPreferredGenres((prev) =>
+      prev.includes(genre) ? prev.filter((item) => item !== genre) : [...prev, genre]
+    );
+  };
 
   const handleNext = async () => {
-    if (currentStep === 1) {
-      if (spotifyAuthenticated) {
-        setCurrentStep(2);
-      }
-    } else if (currentStep === 2) {
-      onComplete();
+    if (!canProceed()) return;
+
+    if (currentStep < totalSteps) {
+      setCurrentStep(currentStep + 1);
+      return;
     }
+
+    localStorage.setItem('neurovibe_music_genres', JSON.stringify(preferredGenres));
+    localStorage.setItem('neurovibe_focus_energy', focusEnergy);
+    localStorage.setItem('neurovibe_mode', selectedMode);
+
+    onComplete();
   };
 
   const handleBack = () => {
@@ -37,13 +66,14 @@ export default function SetupGuide({
 
   const canProceed = () => {
     if (currentStep === 1) return spotifyAuthenticated;
-    if (currentStep === 2) return true;
+    if (currentStep === 2) return preferredGenres.length > 0 && focusEnergy !== '';
+    if (currentStep === 3) return selectedMode === 'focus' || selectedMode === 'relaxation';
+    if (currentStep === 4) return true;
     return false;
   };
 
   return (
     <div className="flex min-h-screen flex-col bg-black text-white">
-      {/* Header */}
       <header className="w-full border-b border-gray-800 bg-black py-4">
         <div className="container mx-auto px-8">
           <button
@@ -56,173 +86,289 @@ export default function SetupGuide({
       </header>
 
       <div className="flex flex-1 flex-col items-center justify-center px-6 py-12">
-        <div className="max-w-4xl mx-auto w-full">
-          {/* Page Title */}
+        <div className="max-w-5xl mx-auto w-full">
           <div className="text-center mb-12">
             <h2 className="text-5xl font-light tracking-tight mb-4 bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
               Setup Guide
             </h2>
             <p className="text-gray-400 text-sm tracking-widest uppercase">
-              Let's get you connected
+              Connect Spotify → Music Survey → Choose Mode → Pair Headset
             </p>
           </div>
 
-        {/* Progress Bar */}
-        <div className="mb-16">
-          <div className="flex items-center justify-center gap-2">
-            {[
-              { step: 1, label: 'Connect Spotify', icon: Music },
-              { step: 2, label: 'Prepare Muse', icon: CheckCircle2 }
-            ].map(({ step, label, icon: Icon }, index) => (
-              <div key={step} className="flex items-center">
-                <div className="flex flex-col items-center gap-2">
-                  <div className={`w-14 h-14 rounded-full flex items-center justify-center font-light text-lg border transition-all duration-500 ${
-                    step === currentStep 
-                      ? 'bg-white border-white text-black scale-110 shadow-lg shadow-white/20' 
-                      : step < currentStep
-                      ? 'bg-purple-500 border-purple-500 text-white'
-                      : 'bg-transparent border-gray-700 text-gray-500'
-                  }`}>
-                    {step < currentStep ? <CheckCircle2 className="w-6 h-6" /> : <Icon className="w-5 h-5" strokeWidth={1.5} />}
+          <div className="mb-16">
+            <div className="flex items-center justify-center gap-2 flex-wrap">
+              {[
+                { step: 1, label: 'Connect Spotify', icon: '🎵' },
+                { step: 2, label: 'Music Survey', icon: '🎧' },
+                { step: 3, label: 'Choose Mode', icon: '✨' },
+                { step: 4, label: 'Pair Headset', icon: '📡' }
+              ] .map(({ step, label, icon }, index) => (
+                <div key={step} className="flex items-center">
+                  <div className="flex flex-col items-center gap-2">
+                    <div className={`w-14 h-14 rounded-full flex items-center justify-center font-light text-lg border transition-all duration-500 ${
+                      step === currentStep
+                        ? 'bg-white border-white text-black scale-110 shadow-lg shadow-white/20'
+                        : step < currentStep
+                        ? 'bg-purple-500 border-purple-500 text-white'
+                        : 'bg-transparent border-gray-700 text-gray-500'
+                    }`}>
+                      {step < currentStep ? <span className="text-xl">✓</span> : <span className="text-lg">{icon}</span>}
+                    </div>
+                    <span className={`text-xs tracking-wider transition-colors duration-300 ${
+                      step === currentStep ? 'text-white' : step < currentStep ? 'text-purple-400' : 'text-gray-600'
+                    }`}>
+                      {label}
+                    </span>
                   </div>
-                  <span className={`text-xs tracking-wider transition-colors duration-300 ${
-                    step === currentStep ? 'text-white' : step < currentStep ? 'text-purple-400' : 'text-gray-600'
-                  }`}>
-                    {label}
-                  </span>
+                  {index < totalSteps - 1 && (
+                    <div className={`w-14 md:w-20 h-px mx-2 md:mx-4 transition-all duration-500 ${
+                      step < currentStep ? 'bg-purple-500' : 'bg-gray-800'
+                    }`}></div>
+                  )}
                 </div>
-                {index < 1 && (
-                  <div className={`w-20 h-px mx-4 transition-all duration-500 ${
-                    step < currentStep ? 'bg-purple-500' : 'bg-gray-800'
-                  }`}></div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-gray-800 rounded-3xl p-8 md:p-12 min-h-[520px] flex flex-col justify-between backdrop-blur-sm bg-gray-950/50">
+            {currentStep === 1 && (
+              <div className="text-center space-y-8">
+                <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center">
+                  <span className="text-4xl">🎵</span>
+                </div>
+                <h2 className="text-4xl md:text-5xl font-light tracking-tight">Connect Spotify</h2>
+                <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
+                  Authenticate with Spotify to enable personalized music recommendations based on your emotions.
+                </p>
+
+                {!spotifyAuthenticated && (
+                  <button
+                    onClick={onSpotifyAuth}
+                    className="group relative flex items-center gap-3 px-10 py-4 mx-auto text-base font-light tracking-wide text-white bg-gradient-to-r from-green-500 to-green-600 rounded-full hover:shadow-2xl hover:shadow-green-500/30 transition-all duration-500 transform hover:scale-105"
+                  >
+                    <span className="text-lg">🎵</span>
+                    <span>Connect Spotify</span>
+                    <span className="text-lg transition-transform group-hover:translate-x-1">→</span>
+                  </button>
+                )}
+
+                {spotifyAuthenticated && (
+                  <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-8 max-w-lg mx-auto">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/20 flex items-center justify-center">
+                      <span className="text-3xl text-green-400">✓</span>
+                    </div>
+                    <h3 className="text-2xl font-light text-white mb-2">Spotify Connected</h3>
+                    <p className="text-gray-400 font-light">Now tell us what music helps you focus.</p>
+                  </div>
                 )}
               </div>
-            ))}
+            )}
+
+            {currentStep === 2 && (
+              <div className="space-y-8">
+                <div className="text-center">
+                  <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-blue-400 to-purple-600 flex items-center justify-center">
+                    <span className="text-4xl">🎧</span>
+                  </div>
+                  <h2 className="text-4xl md:text-5xl font-light tracking-tight">Music Focus Survey</h2>
+                  <p className="text-lg text-gray-400 max-w-2xl mx-auto mt-4 font-light leading-relaxed">
+                    What kind of music helps you focus best? Choose the genres you prefer and whether your focus improves more with energetic or calm tracks.
+                  </p>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                  <div className="bg-gray-900/50 border border-gray-800 rounded-2xl p-6">
+                    <h3 className="text-lg font-light mb-4 text-gray-200">Preferred focus genres</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      {musicGenres.map((genre) => {
+                        const isSelected = preferredGenres.includes(genre);
+                        return (
+                          <button
+                            key={genre}
+                            onClick={() => handleGenreToggle(genre)}
+                            className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                              isSelected
+                                ? 'bg-purple-500/20 border-purple-400 text-purple-200'
+                                : 'bg-gray-950 border-gray-700 text-gray-400 hover:border-gray-500'
+                            }`}
+                          >
+                            {genre}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-900/50 border border-gray-800 rounded-2xl p-6">
+                    <h3 className="text-lg font-light mb-4 text-gray-200">Focus energy preference</h3>
+                    <div className="space-y-3">
+                      <button
+                        onClick={() => setFocusEnergy('energetic')}
+                        className={`w-full p-4 rounded-xl border text-left transition-colors ${
+                          focusEnergy === 'energetic'
+                            ? 'bg-orange-500/20 border-orange-400 text-orange-200'
+                            : 'bg-gray-950 border-gray-700 text-gray-400 hover:border-gray-500'
+                        }`}
+                      >
+                        <p className="font-medium">Energetic music</p>
+                        <p className="text-sm opacity-80">Upbeat, motivating tracks that keep you alert.</p>
+                      </button>
+                      <button
+                        onClick={() => setFocusEnergy('calm')}
+                        className={`w-full p-4 rounded-xl border text-left transition-colors ${
+                          focusEnergy === 'calm'
+                            ? 'bg-teal-500/20 border-teal-400 text-teal-200'
+                            : 'bg-gray-950 border-gray-700 text-gray-400 hover:border-gray-500'
+                        }`}
+                      >
+                        <p className="font-medium">Calm music</p>
+                        <p className="text-sm opacity-80">Gentle, low-stimulation tracks for deep concentration.</p>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentStep === 3 && (
+              <div className="space-y-8">
+                <div className="text-center">
+                  <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-pink-400 to-purple-600 flex items-center justify-center">
+                    <span className="text-4xl">✨</span>
+                  </div>
+                  <h2 className="text-4xl md:text-5xl font-light tracking-tight">Choose Your Mode</h2>
+                  <p className="text-lg text-gray-400 max-w-2xl mx-auto mt-4 font-light leading-relaxed">
+                    Select the experience that best matches your goal for each session.
+                  </p>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-4 max-w-5xl mx-auto">
+                  <button
+                    onClick={() => setSelectedMode('focus')}
+                    className={`p-6 rounded-2xl border text-left transition-colors ${
+                      selectedMode === 'focus'
+                        ? 'bg-indigo-500/20 border-indigo-400'
+                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-indigo-300">🧠</span>
+                      <h3 className="text-lg font-medium text-white">Focus Mode</h3>
+                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed">
+                      Tracks your emotion and plays music to help you remain focused. If your emotion spikes, the music shifts toward more alertness.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setSelectedMode('relaxation')}
+                    className={`p-6 rounded-2xl border text-left transition-colors ${
+                      selectedMode === 'relaxation'
+                        ? 'bg-emerald-500/20 border-emerald-400'
+                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-emerald-300">🍃</span>
+                      <h3 className="text-lg font-medium text-white">Relaxation Mode</h3>
+                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed">
+                      Helps you exit negative or high-stress emotional states. It detects spikes in stress or sadness and responds with calming, uplifting music.
+                    </p>
+                  </button>
+
+                  <div className="p-6 rounded-2xl border border-gray-800 bg-gray-900/30 opacity-70">
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-gray-400">✨</span>
+                      <h3 className="text-lg font-medium text-gray-300">Improve Cognitive Power</h3>
+                    </div>
+                    <p className="text-sm text-gray-400 leading-relaxed mb-4">
+                      Planned mode for boosting memory, problem solving, and sustained cognitive performance.
+                    </p>
+                    <span className="inline-block text-xs px-3 py-1 rounded-full bg-gray-800 text-gray-400 border border-gray-700">Coming soon</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentStep === 4 && (
+              <div className="text-center space-y-8">
+                <div className="mb-8 rounded-2xl overflow-hidden max-w-lg mx-auto border border-gray-800">
+                  <Image
+                    src={museImage}
+                    alt="Muse Headset"
+                    width={500}
+                    height={350}
+                    className="w-full h-auto object-cover"
+                  />
+                </div>
+                <h2 className="text-4xl md:text-5xl font-light tracking-tight">Pair Your Muse Headset</h2>
+                <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
+                  Press and hold the power button until the LED starts blinking blue, then continue to pair and start your session.
+                </p>
+                <div className="bg-gray-900/50 border border-gray-800 rounded-2xl p-8 text-left space-y-4 max-w-lg mx-auto">
+                  <h3 className="font-light text-lg mb-4 text-gray-300 tracking-wide">Before you continue:</h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-4">
+                      <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
+                        <span className="text-sm text-purple-400">✓</span>
+                      </div>
+                      <span className="text-gray-400 font-light">Headset is fully charged</span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
+                        <span className="text-sm text-purple-400">✓</span>
+                      </div>
+                      <span className="text-gray-400 font-light">Bluetooth is enabled on your device</span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
+                        <span className="text-sm text-purple-400">✓</span>
+                      </div>
+                      <span className="text-gray-400 font-light">LED light is blinking blue</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-6 bg-gray-900/50 border border-gray-800 rounded-xl p-4 max-w-lg mx-auto">
+                  <p className="text-sm text-gray-400 font-light">
+                    On the next page, click &quot;Connect Muse Headset&quot; to complete pairing and begin your selected mode.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-between mt-10 gap-4">
+            <button
+              onClick={handleBack}
+              disabled={currentStep === 1}
+              className={`group flex items-center gap-2 px-6 py-3 rounded-full font-light tracking-wide transition-all duration-300 ${
+                currentStep === 1
+                  ? 'bg-gray-900 text-gray-700 cursor-not-allowed border border-gray-800'
+                  : 'bg-gray-900 text-white hover:bg-gray-800 border border-gray-800 hover:border-gray-700'
+              }`}
+            >
+              <span className="text-sm transition-transform group-hover:-translate-x-1">←</span>
+              <span>Back</span>
+            </button>
+
+            <button
+              onClick={handleNext}
+              disabled={!canProceed()}
+              className={`group flex items-center gap-2 px-8 py-3 rounded-full font-light tracking-wide transition-all duration-500 ${
+                !canProceed()
+                  ? 'bg-gray-900 text-gray-700 cursor-not-allowed border border-gray-800'
+                  : currentStep === totalSteps
+                  ? 'bg-gradient-to-r from-green-500 to-blue-500 text-white hover:shadow-xl hover:shadow-green-500/30 transform hover:scale-105'
+                  : 'bg-white text-black hover:shadow-xl hover:shadow-white/20 transform hover:scale-105'
+              }`}
+            >
+              <span>{currentStep === totalSteps ? 'Start Listening' : 'Next'}</span>
+              <span className="text-sm transition-transform group-hover:translate-x-1">→</span>
+            </button>
           </div>
         </div>
-
-        {/* Step Content */}
-        <div className="border border-gray-800 rounded-3xl p-8 md:p-12 min-h-[500px] flex flex-col justify-between backdrop-blur-sm bg-gray-950/50">
-          {/* Step 1: Connect Spotify */}
-          {currentStep === 1 && (
-            <div className="text-center space-y-8">
-              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center">
-                <Music className="w-10 h-10 text-white" strokeWidth={1.5} />
-              </div>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight">Connect Spotify</h2>
-              <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
-                Authenticate with Spotify to enable personalized music recommendations based on your emotions.
-              </p>
-
-              {!spotifyAuthenticated && (
-                <button
-                  onClick={onSpotifyAuth}
-                  className="group relative flex items-center gap-3 px-10 py-4 mx-auto text-base font-light tracking-wide text-white bg-gradient-to-r from-green-500 to-green-600 rounded-full hover:shadow-2xl hover:shadow-green-500/30 transition-all duration-500 transform hover:scale-105"
-                >
-                  <Music className="w-5 h-5" strokeWidth={1.5} />
-                  <span>Connect Spotify</span>
-                  <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
-                </button>
-              )}
-
-              {spotifyAuthenticated && (
-                <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-8 max-w-lg mx-auto">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/20 flex items-center justify-center">
-                    <CheckCircle2 className="w-8 h-8 text-green-400" strokeWidth={1.5} />
-                  </div>
-                  <h3 className="text-2xl font-light text-white mb-2">Spotify Connected</h3>
-                  <p className="text-gray-400 font-light">Ready to set up your Muse headset</p>
-                </div>
-              )}
-
-              <div className="mt-8 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 max-w-lg mx-auto">
-                <p className="text-sm text-blue-400/80 font-light">💡 A Spotify Premium account is recommended for the best experience</p>
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Muse Setup Instructions */}
-          {currentStep === 2 && (
-            <div className="text-center space-y-8">
-              <div className="mb-8 rounded-2xl overflow-hidden max-w-lg mx-auto border border-gray-800">
-                <Image 
-                  src={museImage} 
-                  alt="Muse Headset" 
-                  width={500}
-                  height={350}
-                  className="w-full h-auto object-cover"
-                />
-              </div>
-              <h2 className="text-4xl md:text-5xl font-light tracking-tight">Power On Your Muse</h2>
-              <p className="text-lg text-gray-400 max-w-xl mx-auto font-light leading-relaxed">
-                Press and hold the power button until the LED starts blinking blue.
-              </p>
-              <div className="bg-gray-900/50 border border-gray-800 rounded-2xl p-8 text-left space-y-4 max-w-lg mx-auto">
-                <h3 className="font-light text-lg mb-4 text-gray-300 tracking-wide">Before you continue:</h3>
-                <div className="space-y-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="w-4 h-4 text-purple-400" strokeWidth={2} />
-                    </div>
-                    <span className="text-gray-400 font-light">Headset is fully charged</span>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="w-4 h-4 text-purple-400" strokeWidth={2} />
-                    </div>
-                    <span className="text-gray-400 font-light">Bluetooth is enabled on your device</span>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/50 flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="w-4 h-4 text-purple-400" strokeWidth={2} />
-                    </div>
-                    <span className="text-gray-400 font-light">LED light is blinking blue</span>
-                  </div>
-                </div>
-              </div>
-              <div className="mt-8 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 max-w-lg mx-auto">
-                <p className="text-sm text-blue-400/80 font-light">💡 Make sure your headset isn't connected to any other device</p>
-              </div>
-              <div className="mt-6 bg-gray-900/50 border border-gray-800 rounded-xl p-4 max-w-lg mx-auto">
-                <p className="text-sm text-gray-400 font-light">
-                  Note: You'll connect your Muse headset on the next page where it will be actively used.
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Navigation Buttons */}
-        <div className="flex justify-between mt-10 gap-4">
-          <button
-            onClick={handleBack}
-            disabled={currentStep === 1}
-            className={`group flex items-center gap-2 px-6 py-3 rounded-full font-light tracking-wide transition-all duration-300 ${
-              currentStep === 1
-                ? 'bg-gray-900 text-gray-700 cursor-not-allowed border border-gray-800'
-                : 'bg-gray-900 text-white hover:bg-gray-800 border border-gray-800 hover:border-gray-700'
-            }`}
-          >
-            <ArrowLeft className="w-4 h-4 transition-transform group-hover:-translate-x-1" strokeWidth={1.5} />
-            <span>Back</span>
-          </button>
-
-          <button
-            onClick={handleNext}
-            disabled={!canProceed()}
-            className={`group flex items-center gap-2 px-8 py-3 rounded-full font-light tracking-wide transition-all duration-500 ${
-              !canProceed()
-                ? 'bg-gray-900 text-gray-700 cursor-not-allowed border border-gray-800'
-                : currentStep === 2
-                ? 'bg-gradient-to-r from-green-500 to-blue-500 text-white hover:shadow-xl hover:shadow-green-500/30 transform hover:scale-105'
-                : 'bg-white text-black hover:shadow-xl hover:shadow-white/20 transform hover:scale-105'
-            }`}
-          >
-            <span>{currentStep === 2 ? 'Start Listening' : 'Next'}</span>
-            <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" strokeWidth={1.5} />
-          </button>
-        </div>
-      </div>
       </div>
     </div>
   );

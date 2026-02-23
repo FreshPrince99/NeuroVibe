@@ -79,6 +79,17 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     }
   });
 
+  // Always points to the freshest access token; updated by the refresh timer.
+  // Using a ref (instead of state) avoids re-initialising the SDK on every refresh.
+  const accessTokenRef = useRef<string>(accessToken);
+  // Refs for emotion and deviceId so callbacks stay stable and never trigger
+  // the SDK useEffect to re-run (which would call disconnect).
+  const emotionRef = useRef<string>(emotion);
+  const deviceIdRef = useRef<string>("");
+
+  // Keep refs in sync on every render without causing re-renders.
+  emotionRef.current = emotion;
+
   const emotionCountsRef = useRef<Record<string, number>>({});
   const endHandledForTrackRef = useRef<string>("");
   const hasStartedPlaybackRef = useRef(false);
@@ -93,16 +104,14 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   }));
 
 
+  // Stable — reads emotion from ref, never needs to change.
   const getDominantEmotion = useCallback(() => {
     const counts = emotionCountsRef.current;
     const entries = Object.entries(counts);
-    if (entries.length === 0) {
-      return emotion.toLowerCase();
-    }
-
+    if (entries.length === 0) return emotionRef.current.toLowerCase();
     entries.sort((a, b) => b[1] - a[1]);
     return entries[0][0];
-  }, [emotion]);
+  }, []); // no deps — uses refs only
 
   const buildTrackQuery = useCallback((dominantEmotion: string) => {
     const genresText = preferredGenres.length > 0 ? preferredGenres.join(" ") : "instrumental";
@@ -131,20 +140,23 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   }, [focusEnergy, mode, preferredGenres]);
 
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string) => {
-    if (!deviceId || !accessToken) return;
+    const token = accessTokenRef.current;
+    const device = deviceIdRef.current;
+    if (!device || !token) return;
 
-    const searchQuery = encodeURIComponent(buildTrackQuery(dominantEmotion));
+    const query = buildTrackQuery(dominantEmotion);
+    console.log(`🎵 Searching Spotify | mode=${mode} energy=${focusEnergy} genres=[${preferredGenres.join(", ")}] query="${query}"`);
+    const searchQuery = encodeURIComponent(query);
 
     const searchResponse = await fetch(
       `https://api.spotify.com/v1/search?q=${searchQuery}&type=track&limit=20&market=US`,
       {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       }
     );
 
     if (!searchResponse.ok) {
+      console.warn("Spotify search failed:", searchResponse.status);
       return;
     }
 
@@ -157,19 +169,57 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
     const chosenTrack = tracks[Math.floor(Math.random() * tracks.length)];
 
-    await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+    await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
       method: "PUT",
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        uris: [chosenTrack.uri],
-      }),
+      body: JSON.stringify({ uris: [chosenTrack.uri] }),
     });
 
     emotionCountsRef.current = {};
-  }, [accessToken, buildTrackQuery, deviceId]);
+  // deviceId and accessToken are read from refs \u2014 intentionally excluded from deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildTrackQuery, focusEnergy, mode, preferredGenres]);
+
+  // Proactively refresh the Spotify token ~5 min before it expires.
+  useEffect(() => {
+    const doRefresh = async () => {
+      const refreshToken = localStorage.getItem("spotify_refresh_token");
+      if (!refreshToken) return;
+      try {
+        const res = await fetch("/api/auth/spotify/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        const data = await res.json();
+        if (data.access_token) {
+          accessTokenRef.current = data.access_token;
+          localStorage.setItem("spotify_access_token", data.access_token);
+          const expiry = Date.now() + (data.expires_in ?? 3600) * 1000;
+          localStorage.setItem("spotify_token_expiry", expiry.toString());
+          console.log("✓ Spotify token refreshed");
+        }
+      } catch (e) {
+        console.warn("Spotify token refresh failed:", e);
+      }
+    };
+
+    // Schedule first refresh 5 min before the stored expiry, then every 55 min.
+    const expiry = parseInt(localStorage.getItem("spotify_token_expiry") || "0");
+    const refreshIn = Math.max(expiry - Date.now() - 5 * 60 * 1000, 30_000);
+    const t = setTimeout(() => {
+      void doRefresh();
+    }, refreshIn);
+    const interval = setInterval(() => void doRefresh(), 55 * 60 * 1000);
+
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+    };
+  }, []);
 
   // Initialize Spotify Web Playback SDK
   useEffect(() => {
@@ -183,17 +233,21 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     let spotifyPlayer: SpotifyPlayer | null = null;
 
     window.onSpotifyWebPlaybackSDKReady = () => {
-      spotifyPlayer = new window.Spotify.Player({
+      const sp: SpotifyPlayer = new window.Spotify.Player({
         name: "NeuroVibe Player",
-        getOAuthToken: (cb: (token: string) => void) => cb(accessToken),
+        // Always read from the ref so the SDK gets a fresh token after refresh.
+        getOAuthToken: (cb: (token: string) => void) => cb(accessTokenRef.current),
         volume: 0.5,
       });
+      spotifyPlayer = sp;
 
-      spotifyPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
-        setDeviceId(device_id);
+      sp.addListener("ready", (state: unknown) => {
+        const typedState = state as { device_id: string };
+        deviceIdRef.current = typedState.device_id;
+        setDeviceId(typedState.device_id);
       });
 
-      spotifyPlayer.addListener("player_state_changed", (state: unknown) => {
+      sp.addListener("player_state_changed", (state: unknown) => {
         const typedState = state as SpotifyPlayerState | null;
         if (!typedState) return;
 
@@ -219,13 +273,13 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         }
       });
 
-      spotifyPlayer.connect().then((success: boolean) => {
+      sp.connect().then((success: boolean) => {
         if (!success) {
           setIsAuthenticated(false);
         }
       });
 
-      setPlayer(spotifyPlayer as SpotifyPlayer);
+      setPlayer(sp);
     };
 
     return () => {
@@ -233,13 +287,21 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         spotifyPlayer.disconnect();
       }
     };
-  }, [accessToken, getDominantEmotion, playTrackForEmotionSummary]);
+  // Only re-run if the access token itself changes (e.g. a full re-auth).
+  // getDominantEmotion and playTrackForEmotionSummary are now stable refs-based
+  // callbacks, so they must NOT be listed here or emotion changes will disconnect SDK.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken]);
 
+  // Trigger the very first track once the device is ready. Guarded by ref so
+  // changing emotion later never re-fires this.
   useEffect(() => {
     if (!deviceId || !accessToken || hasStartedPlaybackRef.current) return;
     hasStartedPlaybackRef.current = true;
-    void playTrackForEmotionSummary(emotion.toLowerCase());
-  }, [accessToken, deviceId, emotion, playTrackForEmotionSummary]);
+    void playTrackForEmotionSummary(emotionRef.current.toLowerCase());
+  // emotion intentionally omitted — emotionRef.current is read at call time.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, deviceId, playTrackForEmotionSummary]);
 
   // Collect emotion samples while a track is playing; evaluated at song end.
   useEffect(() => {

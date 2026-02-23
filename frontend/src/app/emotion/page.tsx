@@ -36,9 +36,12 @@ export default function EmotionPage() {
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const playerRef = useRef<PlayerRef>(null);
+  const testModeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Initialize WebSocket connection
+  // Initialize WebSocket connection (skip in test mode — backend is not needed)
   useEffect(() => {
+    if (localStorage.getItem('neurovibe_test_mode') === 'true') return;
+
     socketRef.current = io('http://localhost:5000', {
       transports: ['websocket'],
       autoConnect: true,
@@ -86,6 +89,9 @@ export default function EmotionPage() {
 
   // Prompt user to connect Muse (always show on page load)
   useEffect(() => {
+    // If test mode is active, don't show the connect prompt — handled below
+    if (localStorage.getItem('neurovibe_test_mode') === 'true') return;
+
     const justCompletedSetup = sessionStorage.getItem('neurovibe_just_setup');
     
     if (justCompletedSetup === 'true') {
@@ -99,6 +105,35 @@ export default function EmotionPage() {
       setNeedsConnect(true);
       setConnectionStatus('Click "Connect Muse Headset" to start');
     }
+  }, []);
+
+  // Test mode: skip headset connection and cycle through demo emotions
+  useEffect(() => {
+    const isTestMode = localStorage.getItem('neurovibe_test_mode') === 'true';
+    if (!isTestMode) return;
+
+    console.log('🧪 Test mode active — simulating EEG emotions');
+    sessionStorage.removeItem('neurovibe_just_setup');
+    setNeedsConnect(false);
+    setIsConnected(true);
+    setConnectionStatus('🧪 Test Mode — simulated EEG data');
+
+    const testEmotions = ['focused', 'calm', 'stressed', 'relaxed', 'neutral', 'happy'];
+    let index = 0;
+    setPredictedEmotion(testEmotions[0]);
+
+    testModeIntervalRef.current = setInterval(() => {
+      index = (index + 1) % testEmotions.length;
+      setPredictedEmotion(testEmotions[index]);
+      console.log(`🧪 Simulated emotion: ${testEmotions[index]}`);
+    }, 30000); // 30 s per emotion — mirrors a realistic EEG reading window
+
+    return () => {
+      if (testModeIntervalRef.current) {
+        clearInterval(testModeIntervalRef.current);
+        testModeIntervalRef.current = null;
+      }
+    };
   }, []);
 
   const handleConnectMuse = async () => {
@@ -176,21 +211,47 @@ export default function EmotionPage() {
   };
 
   const handlePauseToggle = () => {
+    const isTestMode = localStorage.getItem('neurovibe_test_mode') === 'true';
+
     if (isPaused) {
-      // Resume - reconnect
-      handleConnectMuse();
+      if (isTestMode) {
+        // Resume test mode — restart the emotion cycle
+        setIsPaused(false);
+        setIsConnected(true);
+        setConnectionStatus('🧪 Test Mode — simulated EEG data');
+        const testEmotions = ['focused', 'calm', 'stressed', 'relaxed', 'neutral', 'happy'];
+        let index = testEmotions.indexOf(predictedEmotion) ?? 0;
+        testModeIntervalRef.current = setInterval(() => {
+          index = (index + 1) % testEmotions.length;
+          setPredictedEmotion(testEmotions[index]);
+        }, 30000);
+      } else {
+        // Resume real headset — reconnect
+        handleConnectMuse();
+      }
     } else {
-      // Pause - disconnect but don't show popup
+      // Pause — stop cycle / disconnect headset
+      if (testModeIntervalRef.current) {
+        clearInterval(testModeIntervalRef.current);
+        testModeIntervalRef.current = null;
+      }
       if (clientRef.current) {
         clientRef.current.disconnect();
       }
       setIsPaused(true);
       setIsConnected(false);
-      setConnectionStatus('Paused - Click "Resume" to continue');
+      setConnectionStatus(isTestMode ? '🧪 Test Mode paused' : 'Paused - Click "Resume" to continue');
     }
   };
 
   const handleExitToHome = () => {
+    // Stop test mode interval if running
+    if (testModeIntervalRef.current) {
+      clearInterval(testModeIntervalRef.current);
+      testModeIntervalRef.current = null;
+    }
+    localStorage.removeItem('neurovibe_test_mode');
+
     // Pause music
     if (playerRef.current) {
       playerRef.current.pause();

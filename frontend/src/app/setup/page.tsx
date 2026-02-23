@@ -65,6 +65,18 @@ export default function SetupPage() {
     router.push('/emotion');
   };
 
+  const handleTestMode = () => {
+    // Save preferences first (same as handleNext on the last step)
+    const genres = localStorage.getItem('neurovibe_music_genres'); // already set by step nav
+    if (!genres) {
+      localStorage.setItem('neurovibe_music_genres', JSON.stringify([]));
+    }
+    // Mark test mode so the emotion page skips headset connection
+    localStorage.setItem('neurovibe_test_mode', 'true');
+    sessionStorage.setItem('neurovibe_just_setup', 'true');
+    router.push('/emotion');
+  };
+
   const handleBackToHome = () => {
     // Clear localStorage
     localStorage.removeItem('neurovibe_awaiting_spotify');
@@ -79,6 +91,7 @@ export default function SetupPage() {
       onComplete={handleSetupComplete}
       spotifyAuthenticated={spotifyAuthenticated}
       onBackToHome={handleBackToHome}
+      onTestMode={handleTestMode}
     />
   );
 }

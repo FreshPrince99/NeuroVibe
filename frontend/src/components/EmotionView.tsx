@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Player, { PlayerRef } from './player';
 import EEGVisualization from './EEGVisualization';
 
@@ -50,6 +50,16 @@ export default function EmotionView({
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
+  // Only auto-enable Muse prediction on the very first prediction that arrives.
+  // After that, the user's manual toggle must not be overridden.
+  const hasAutoEnabledRef = useRef(false);
+
+  useEffect(() => {
+    if (predictedEmotion && isUsingMusePrediction && !hasAutoEnabledRef.current) {
+      hasAutoEnabledRef.current = true;
+      setUseMusePrediction(true);
+    }
+  }, [predictedEmotion, isUsingMusePrediction]);
 
   const emotions = [
     { name: "happy", color: "bg-yellow-400" },
@@ -78,11 +88,6 @@ export default function EmotionView({
   };
 
   const formatVAD = (value: number) => value.toFixed(2);
-
-  // Update useMusePrediction when new prediction comes in
-  if (predictedEmotion && !useMusePrediction && isUsingMusePrediction) {
-    setUseMusePrediction(true);
-  }
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-50 dark:bg-black">

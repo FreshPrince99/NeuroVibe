@@ -8,6 +8,7 @@ interface SetupGuideProps {
   onComplete: () => void;
   spotifyAuthenticated: boolean;
   onBackToHome?: () => void;
+  onTestMode?: () => void;
 }
 
 type SessionMode = 'focus' | 'relaxation' | 'cognitive';
@@ -28,7 +29,8 @@ export default function SetupGuide({
   onSpotifyAuth,
   onComplete,
   spotifyAuthenticated,
-  onBackToHome
+  onBackToHome,
+  onTestMode
 }: SetupGuideProps) {
   const [currentStep, setCurrentStep] = useState(1);
   const [preferredGenres, setPreferredGenres] = useState<string[]>([]);
@@ -335,6 +337,26 @@ export default function SetupGuide({
                     On the next page, click &quot;Connect Muse Headset&quot; to complete pairing and begin your selected mode.
                   </p>
                 </div>
+
+                {onTestMode && (
+                  <div className="mt-8 pt-8 border-t border-gray-800 max-w-lg mx-auto">
+                    <p className="text-xs text-gray-600 uppercase tracking-widest mb-4">No headset? Try a demo</p>
+                    <button
+                      onClick={() => {
+                        localStorage.setItem('neurovibe_music_genres', JSON.stringify(preferredGenres));
+                        localStorage.setItem('neurovibe_focus_energy', focusEnergy);
+                        localStorage.setItem('neurovibe_mode', selectedMode);
+                        onTestMode?.();
+                      }}
+                      className="group flex items-center gap-3 px-8 py-3 mx-auto rounded-full border border-dashed border-gray-600 text-gray-400 hover:border-purple-500 hover:text-purple-300 transition-all duration-300 text-sm font-light tracking-wide"
+                    >
+                      <span>🧪</span>
+                      <span>Use Test Mode</span>
+                      <span className="transition-transform group-hover:translate-x-1">→</span>
+                    </button>
+                    <p className="text-xs text-gray-700 mt-3">Simulates EEG emotions so you can explore the full experience.</p>
+                  </div>
+                )}
               </div>
             )}
           </div>

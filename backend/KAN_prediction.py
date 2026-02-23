@@ -171,7 +171,9 @@ class EmotionPredictor:
 
     def __init__(self, model_path='models/mood_model.pth',
                  scaler_path='models/scaler.pkl',
-                 label_encoder_path='models/label_encoder.pkl'):
+                 label_encoder_path='models/label_encoder.pkl',
+                 sample_rate=256,
+                 window_seconds=60):
         """
         Initialize the emotion predictor with model, scaler, and label encoder.
 
@@ -179,11 +181,14 @@ class EmotionPredictor:
             model_path: Path to the trained EmotionNet model (.pth file)
             scaler_path: Path to the StandardScaler (.pkl file)
             label_encoder_path: Path to the LabelEncoder (.pkl file)
+            sample_rate: EEG sampling rate (default: 256 Hz for Muse S)
+            window_seconds: Window size in seconds (default: 60)
         """
         self.model_path = model_path
         self.scaler_path = scaler_path
         self.label_encoder_path = label_encoder_path
-        self.SampleRate = 256  # Muse S sampling rate
+        self.SampleRate = sample_rate
+        self.window_seconds = window_seconds
 
         # Load model and preprocessors
         self._load_label_encoder() # Load label encoder first to get num_classes
@@ -191,6 +196,11 @@ class EmotionPredictor:
         self._load_scaler()
 
         print("EmotionPredictor initialized successfully!")
+    
+    @property
+    def required_samples(self) -> int:
+        """Return the number of samples required for prediction."""
+        return self.SampleRate * self.window_seconds
 
     def _load_model(self):
         """Load the trained KAN model."""

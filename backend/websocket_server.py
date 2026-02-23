@@ -7,21 +7,42 @@ from flask import Flask
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from CNN_prediction import CNNEmotionPredictor
+from LSTM_prediction import LSTMEmotionPredictor
+from KAN_prediction import EmotionPredictor as KANEmotionPredictor
 import numpy as np
 import sys
+import argparse
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='EEG Emotion Prediction WebSocket Server')
+parser.add_argument('--model', type=str, default='kan', choices=['cnn', 'lstm', 'kan'],
+                    help='Choose prediction model: cnn, lstm, or kan (default: kan)')
+args = parser.parse_args()
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Initialize the emotion predictor
-print("Initializing CNNEmotionPredictor...")
+# Initialize the emotion predictor based on argument
+MODEL_TYPE = args.model.upper()
+print(f"Initializing {MODEL_TYPE} Emotion Predictor...")
 try:
-    predictor = CNNEmotionPredictor(
-        model_path='models/eeg_emotion_prediction_model.keras'
-    )
-    print("✓ CNNEmotionPredictor ready!")
+    if args.model == 'cnn':
+        predictor = CNNEmotionPredictor(
+            model_path='models/eeg_emotion_prediction_model.keras'
+        )
+    elif args.model == 'lstm':
+        predictor = LSTMEmotionPredictor(
+            model_path='models/lstm_model.h5'
+        )
+    else:  # kan
+        predictor = KANEmotionPredictor(
+            model_path='models/mood_model.pth',
+            scaler_path='models/scaler.pkl',
+            label_encoder_path='models/label_encoder.pkl'
+        )
+    print(f"✓ {MODEL_TYPE} Predictor ready!")
 except Exception as e:
     print(f"❌ Failed to initialize predictor: {e}")
     sys.exit(1)
@@ -111,9 +132,30 @@ def handle_eeg_sample(data):
                     'TP10': np.mean(channels_data['tp10'])
                 }
                 
-                print(f"📈 Computing PSD from {channels_data['tp9'].shape[0]} samples per channel...")
+                print(f"📈 Computing features from {channels_data['tp9'].shape[0]} samples per channel...")
 
-                emotion, raw_vad, clamped_vad = predictor.predict_emotion(channels_data)
+                # Handle different predictor return types
+                if args.model == 'cnn':
+                    emotion, raw_vad, clamped_vad = predictor.predict_emotion(channels_data)
+                elif args.model == 'lstm':
+                    emotion, prediction = predictor.predict_emotion(channels_data)
+                    raw_vad = None
+                    clamped_vad = None
+                else:  # kan
+                    # KAN model uses different feature extraction
+                    # Convert dict to list format expected by KAN
+                    eeg_channels_list = [
+                        channels_data['tp9'],
+                        channels_data['af7'],
+                        channels_data['af8'],
+                        channels_data['tp10']
+                    ]
+                    # Compute KAN features and predict
+                    advanced_features = predictor.compute_all_advanced_features(eeg_channels_list, debug=False)
+                    emotion = predictor.predict(advanced_features)
+                    raw_vad = None
+                    clamped_vad = None
+                    prediction = None
 
                 # Save timestamp and buffer size before clearing
                 last_timestamp = eeg_buffer[-1]['timestamp'] if eeg_buffer else 0
@@ -123,14 +165,22 @@ def handle_eeg_sample(data):
                 print("\n" + "="*60)
                 print(f"🧠 EMOTION: {emotion.upper()}")
                 print("-"*60)
-                print(
-                    f"   VAD (raw): {raw_vad.valence:6.2f}, "
-                    f"{raw_vad.arousal:6.2f}, {raw_vad.dominance:6.2f}"
-                )
-                print(
-                    f"   VAD (1-9): {clamped_vad.valence:6.2f}, "
-                    f"{clamped_vad.arousal:6.2f}, {clamped_vad.dominance:6.2f}"
-                )
+                
+                if args.model == 'cnn':
+                    print(
+                        f"   VAD (raw): {raw_vad.valence:6.2f}, "
+                        f"{raw_vad.arousal:6.2f}, {raw_vad.dominance:6.2f}"
+                    )
+                    print(
+                        f"   VAD (1-9): {clamped_vad.valence:6.2f}, "
+                        f"{clamped_vad.arousal:6.2f}, {clamped_vad.dominance:6.2f}"
+                    )
+                elif args.model == 'lstm':
+                    print(f"   Negative:  {prediction.negative_prob:6.2%}")
+                    print(f"   Neutral:   {prediction.neutral_prob:6.2%}")
+                    print(f"   Positive:  {prediction.positive_prob:6.2%}")
+                # KAN model doesn't provide probabilities in the same way
+                
                 print(f"   TP9:  {channel_means['TP9']:8.2f} µV")
                 print(f"   AF7:  {channel_means['AF7']:8.2f} µV")
                 print(f"   AF8:  {channel_means['AF8']:8.2f} µV")
@@ -138,21 +188,32 @@ def handle_eeg_sample(data):
                 print("="*60 + "\n")
 
                 # Send prediction back to client
-                emit('emotion_prediction', {
+                response_data = {
                     'emotion': emotion,
-                    'vad': {
+                    'timestamp': last_timestamp,
+                    'samples_processed': buffer_size
+                }
+                
+                if args.model == 'cnn':
+                    response_data['vad'] = {
                         'valence': clamped_vad.valence,
                         'arousal': clamped_vad.arousal,
                         'dominance': clamped_vad.dominance
-                    },
-                    'raw_vad': {
+                    }
+                    response_data['raw_vad'] = {
                         'valence': raw_vad.valence,
                         'arousal': raw_vad.arousal,
                         'dominance': raw_vad.dominance
-                    },
-                    'timestamp': last_timestamp,
-                    'samples_processed': buffer_size
-                })
+                    }
+                elif args.model == 'lstm':
+                    response_data['probabilities'] = {
+                        'negative': prediction.negative_prob,
+                        'neutral': prediction.neutral_prob,
+                        'positive': prediction.positive_prob
+                    }
+                # KAN model just sends the emotion label
+                
+                emit('emotion_prediction', response_data)
             
             except Exception as processing_error:
                 print(f"❌ Processing error: {processing_error}\n")
@@ -192,8 +253,9 @@ def health_check():
 
 if __name__ == '__main__':
     print("\n" + "="*60)
-    print("🧠 EEG Emotion Prediction WebSocket Server")
+    print(f"🧠 EEG Emotion Prediction WebSocket Server ({MODEL_TYPE})")
     print("="*60)
+    print(f"Model: {MODEL_TYPE}")
     print(f"Server starting on http://localhost:5000")
     print(f"Buffer size: {BUFFER_SIZE} samples ({BUFFER_SIZE/SAMPLE_RATE}s)")
     print("Waiting for connections...")

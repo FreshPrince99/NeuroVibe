@@ -92,7 +92,12 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
   const emotionCountsRef = useRef<Record<string, number>>({});
   const endHandledForTrackRef = useRef<string>("");
+  const activeTrackUriRef = useRef<string>("");
+  const trackEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasStartedPlaybackRef = useRef(false);
+
+  const [positionMs, setPositionMs] = useState(0);
+  const positionMsRef = useRef(0);
 
 
   useImperativeHandle(ref, () => ({
@@ -139,10 +144,10 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     return `calm deep focus ${genresText}`;
   }, [focusEnergy, mode, preferredGenres]);
 
-  const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string) => {
+  const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
     const token = accessTokenRef.current;
     const device = deviceIdRef.current;
-    if (!device || !token) return;
+    if (!device || !token) return false;
 
     const query = buildTrackQuery(dominantEmotion);
     console.log(`🎵 Searching Spotify | mode=${mode} energy=${focusEnergy} genres=[${preferredGenres.join(", ")}] query="${query}"`);
@@ -157,7 +162,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
     if (!searchResponse.ok) {
       console.warn("Spotify search failed:", searchResponse.status);
-      return;
+      return false;
     }
 
     const searchData = await searchResponse.json();
@@ -165,11 +170,11 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
       (track: SpotifyTrack) => track?.uri && !track?.is_local
     );
 
-    if (tracks.length === 0) return;
+    if (tracks.length === 0) return false;
 
     const chosenTrack = tracks[Math.floor(Math.random() * tracks.length)];
 
-    await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
+    const playResponse = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -178,10 +183,26 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
       body: JSON.stringify({ uris: [chosenTrack.uri] }),
     });
 
+    if (!playResponse.ok) {
+      console.warn("Spotify play failed:", playResponse.status);
+      return false;
+    }
+
     emotionCountsRef.current = {};
+    return true;
   // deviceId and accessToken are read from refs \u2014 intentionally excluded from deps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildTrackQuery, focusEnergy, mode, preferredGenres]);
+
+  const queueNextTrackFromSummary = useCallback(async (trackUri: string) => {
+    if (!trackUri || endHandledForTrackRef.current === trackUri) return;
+
+    const dominantEmotion = getDominantEmotion();
+    const started = await playTrackForEmotionSummary(dominantEmotion);
+    if (started) {
+      endHandledForTrackRef.current = trackUri;
+    }
+  }, [getDominantEmotion, playTrackForEmotionSummary]);
 
   // Proactively refresh the Spotify token ~5 min before it expires.
   useEffect(() => {
@@ -254,6 +275,15 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         const track = typedState.track_window.current_track;
         const trackUri = track.uri;
 
+        if (activeTrackUriRef.current !== trackUri) {
+          activeTrackUriRef.current = trackUri;
+          endHandledForTrackRef.current = "";
+          if (trackEndTimerRef.current) {
+            clearTimeout(trackEndTimerRef.current);
+            trackEndTimerRef.current = null;
+          }
+        }
+
         setCurrentTrack({
           name: track.name,
           artist: track.artists.map((a: SpotifyArtist) => a.name).join(", "),
@@ -263,13 +293,32 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
           durationMs: typedState.duration,
         });
 
+        positionMsRef.current = typedState.position;
+        setPositionMs(typedState.position);
         setIsPlaying(!typedState.paused);
 
-        const hasEnded = typedState.duration > 0 && typedState.position >= typedState.duration - 300;
-        if (hasEnded && endHandledForTrackRef.current !== trackUri) {
-          endHandledForTrackRef.current = trackUri;
-          const dominantEmotion = getDominantEmotion();
-          void playTrackForEmotionSummary(dominantEmotion);
+        const remainingMs = Math.max(typedState.duration - typedState.position, 0);
+
+        if (!typedState.paused && typedState.duration > 0) {
+          // Track is playing — (re)schedule the end-of-track callback.
+          if (trackEndTimerRef.current) clearTimeout(trackEndTimerRef.current);
+          trackEndTimerRef.current = setTimeout(() => {
+            if (activeTrackUriRef.current !== trackUri) return;
+            void queueNextTrackFromSummary(trackUri);
+          }, remainingMs + 750);
+        } else if (typedState.paused) {
+          // Track is paused — cancel the timer so it doesn't auto-skip.
+          if (trackEndTimerRef.current) {
+            clearTimeout(trackEndTimerRef.current);
+            trackEndTimerRef.current = null;
+          }
+        }
+
+        // Only treat as ended when position genuinely reaches the end while playing.
+        const hasEnded = !typedState.paused && typedState.duration > 0 &&
+          typedState.position >= typedState.duration - 300;
+        if (hasEnded) {
+          void queueNextTrackFromSummary(trackUri);
         }
       });
 
@@ -283,15 +332,18 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     };
 
     return () => {
+      if (trackEndTimerRef.current) {
+        clearTimeout(trackEndTimerRef.current);
+        trackEndTimerRef.current = null;
+      }
       if (spotifyPlayer) {
         spotifyPlayer.disconnect();
       }
     };
   // Only re-run if the access token itself changes (e.g. a full re-auth).
-  // getDominantEmotion and playTrackForEmotionSummary are now stable refs-based
+  // queueNextTrackFromSummary is stable and safe to include.
   // callbacks, so they must NOT be listed here or emotion changes will disconnect SDK.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken]);
+  }, [accessToken, queueNextTrackFromSummary]);
 
   // Trigger the very first track once the device is ready. Guarded by ref so
   // changing emotion later never re-fires this.
@@ -303,12 +355,29 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, deviceId, playTrackForEmotionSummary]);
 
+  // Tick position forward every second while playing (SDK events are not 1-per-second).
+  useEffect(() => {
+    if (!isPlaying) return;
+    const id = setInterval(() => {
+      positionMsRef.current += 1000;
+      setPositionMs(positionMsRef.current);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isPlaying]);
+
   // Collect emotion samples while a track is playing; evaluated at song end.
   useEffect(() => {
     if (!currentTrack?.uri || !isPlaying) return;
     const normalizedEmotion = emotion.toLowerCase();
     emotionCountsRef.current[normalizedEmotion] = (emotionCountsRef.current[normalizedEmotion] || 0) + 1;
   }, [emotion, currentTrack?.uri, isPlaying]);
+
+  const formatTime = (ms: number) => {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${String(sec).padStart(2, "0")}`;
+  };
 
   const togglePlayPause = () => {
     if (player) {
@@ -365,6 +434,25 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
           {currentTrack.album}
         </p>
       </div>
+
+      {/* Progress bar */}
+      {currentTrack.durationMs > 0 && (
+        <div className="w-full max-w-xs space-y-1">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+            <div
+              className="h-full rounded-full bg-green-500"
+              style={{
+                width: `${Math.min((positionMs / currentTrack.durationMs) * 100, 100)}%`,
+                transition: "width 1s linear",
+              }}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>{formatTime(positionMs)}</span>
+            <span>{formatTime(currentTrack.durationMs)}</span>
+          </div>
+        </div>
+      )}
 
       <button
         onClick={togglePlayPause}

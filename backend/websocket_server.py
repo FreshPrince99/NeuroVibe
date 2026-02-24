@@ -12,6 +12,9 @@ from KAN_prediction import EmotionPredictor as KANEmotionPredictor
 import numpy as np
 import sys
 import argparse
+import threading
+import time
+from collections import Counter
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='EEG Emotion Prediction WebSocket Server')
@@ -53,6 +56,36 @@ eeg_buffer = []
 BUFFER_SIZE = predictor.required_samples
 SAMPLE_RATE = 256
 is_processing = False  # Flag to prevent multiple simultaneous predictions
+
+# Emotion log: list of (wall_clock_time, emotion_string) recorded each prediction
+emotion_log: list = []
+emotion_log_lock = threading.Lock()
+session_start = time.time()
+
+def _emotion_reporter():
+    """Daemon thread: every 60 s, print a tally of all emotions recorded so far."""
+    while True:
+        time.sleep(60)
+        elapsed = int(time.time() - session_start)
+        with emotion_log_lock:
+            if not emotion_log:
+                print(f"\n\U0001f4ca [Emotion Report | {elapsed//60}m {elapsed%60}s] No emotions recorded yet.\n")
+                continue
+            counts = Counter(e for _, e in emotion_log)
+            total = sum(counts.values())
+            print("\n" + "="*60)
+            print(f"\U0001f4ca EMOTION REPORT  (session time: {elapsed//60}m {elapsed%60}s, {total} readings)")
+            print("-"*60)
+            for em, cnt in counts.most_common():
+                pct = cnt / total * 100
+                bar = "\u2588" * max(1, int(pct / 5))
+                print(f"   {em:<16} {bar:<20} {pct:5.1f}%  ({cnt} readings)")
+            dominant = counts.most_common(1)[0][0]
+            print(f"\n   \u25b6 Dominant emotion: {dominant.upper()}")
+            print("="*60 + "\n")
+
+_reporter_thread = threading.Thread(target=_emotion_reporter, daemon=True, name="emotion-reporter")
+_reporter_thread.start()
 
 @socketio.on('connect')
 def handle_connect():
@@ -214,6 +247,10 @@ def handle_eeg_sample(data):
                 # KAN model just sends the emotion label
                 
                 emit('emotion_prediction', response_data)
+
+                # Record emotion for the periodic report
+                with emotion_log_lock:
+                    emotion_log.append((time.time(), emotion))
             
             except Exception as processing_error:
                 print(f"❌ Processing error: {processing_error}\n")

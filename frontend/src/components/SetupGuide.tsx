@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import Image from 'next/image';
 import museImage from '@/assets/muse.jpg';
+import CalibrationStep from '@/components/CalibrationStep';
 
 interface SetupGuideProps {
   onSpotifyAuth: () => void;
@@ -9,6 +10,8 @@ interface SetupGuideProps {
   spotifyAuthenticated: boolean;
   onBackToHome?: () => void;
   onTestMode?: () => void;
+  /** If true, insert a calibration step before Choose Mode */
+  needsCalibration?: boolean;
 }
 
 type SessionMode = 'focus' | 'relaxation' | 'cognitive';
@@ -30,14 +33,40 @@ export default function SetupGuide({
   onComplete,
   spotifyAuthenticated,
   onBackToHome,
-  onTestMode
+  onTestMode,
+  needsCalibration = false,
 }: SetupGuideProps) {
   const [currentStep, setCurrentStep] = useState(1);
   const [preferredGenres, setPreferredGenres] = useState<string[]>([]);
   const [focusEnergy, setFocusEnergy] = useState<FocusEnergy>('');
   const [selectedMode, setSelectedMode] = useState<SessionMode | ''>('');
 
-  const totalSteps = 4;
+  // Steps:
+  //   1 – Connect Spotify
+  //   2 – Music Survey
+  //   3 – Pair Headset
+  //   4 – Calibration  (first-time users only, needsCalibration=true)
+  //   4/5 – Choose Mode  (always last)
+  const totalSteps = needsCalibration ? 5 : 4;
+  const PAIR_STEP  = 3;
+  const CAL_STEP   = needsCalibration ? 4 : -1;   // -1 means not present
+  const MODE_STEP  = needsCalibration ? 5 : 4;    // Choose Mode is always last
+
+  // Step metadata for the progress indicator
+  const stepDefs = needsCalibration
+    ? [
+        { step: 1, label: 'Connect Spotify',  icon: '🎵' },
+        { step: 2, label: 'Music Survey',      icon: '🎧' },
+        { step: 3, label: 'Pair Headset',      icon: '📡' },
+        { step: 4, label: 'Calibration',       icon: '🧬' },
+        { step: 5, label: 'Choose Mode',       icon: '✨' },
+      ]
+    : [
+        { step: 1, label: 'Connect Spotify',  icon: '🎵' },
+        { step: 2, label: 'Music Survey',      icon: '🎧' },
+        { step: 3, label: 'Pair Headset',      icon: '📡' },
+        { step: 4, label: 'Choose Mode',       icon: '✨' },
+      ];
 
   const handleGenreToggle = (genre: string) => {
     setPreferredGenres((prev) =>
@@ -48,15 +77,18 @@ export default function SetupGuide({
   const handleNext = async () => {
     if (!canProceed()) return;
 
+    // Calibration step uses its own CTA (CalibrationStep.onComplete) — skip here
+    if (currentStep === CAL_STEP) return;
+
     if (currentStep < totalSteps) {
       setCurrentStep(currentStep + 1);
       return;
     }
 
+    // Last step (Choose Mode) — save and complete
     localStorage.setItem('neurovibe_music_genres', JSON.stringify(preferredGenres));
     localStorage.setItem('neurovibe_focus_energy', focusEnergy);
     localStorage.setItem('neurovibe_mode', selectedMode);
-
     onComplete();
   };
 
@@ -69,8 +101,9 @@ export default function SetupGuide({
   const canProceed = () => {
     if (currentStep === 1) return spotifyAuthenticated;
     if (currentStep === 2) return preferredGenres.length > 0 && focusEnergy !== '';
-    if (currentStep === 3) return selectedMode === 'focus' || selectedMode === 'relaxation';
-    if (currentStep === 4) return true;
+    if (currentStep === PAIR_STEP) return true;
+    if (currentStep === CAL_STEP) return false;  // CalibrationStep drives its own advance
+    if (currentStep === MODE_STEP) return selectedMode === 'focus' || selectedMode === 'relaxation';
     return false;
   };
 
@@ -100,12 +133,7 @@ export default function SetupGuide({
 
           <div className="mb-16">
             <div className="flex items-center justify-center gap-2 flex-wrap">
-              {[
-                { step: 1, label: 'Connect Spotify', icon: '🎵' },
-                { step: 2, label: 'Music Survey', icon: '🎧' },
-                { step: 3, label: 'Choose Mode', icon: '✨' },
-                { step: 4, label: 'Pair Headset', icon: '📡' }
-              ] .map(({ step, label, icon }, index) => (
+              {stepDefs.map(({ step, label, icon }, index) => (
                 <div key={step} className="flex items-center">
                   <div className="flex flex-col items-center gap-2">
                     <div className={`w-14 h-14 rounded-full flex items-center justify-center font-light text-lg border transition-all duration-500 ${
@@ -124,7 +152,7 @@ export default function SetupGuide({
                     </span>
                   </div>
                   {index < totalSteps - 1 && (
-                    <div className={`w-14 md:w-20 h-px mx-2 md:mx-4 transition-all duration-500 ${
+                    <div className={`w-10 md:w-16 h-px mx-2 transition-all duration-500 ${
                       step < currentStep ? 'bg-purple-500' : 'bg-gray-800'
                     }`}></div>
                   )}
@@ -233,68 +261,7 @@ export default function SetupGuide({
               </div>
             )}
 
-            {currentStep === 3 && (
-              <div className="space-y-8">
-                <div className="text-center">
-                  <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-pink-400 to-purple-600 flex items-center justify-center">
-                    <span className="text-4xl">✨</span>
-                  </div>
-                  <h2 className="text-4xl md:text-5xl font-light tracking-tight">Choose Your Mode</h2>
-                  <p className="text-lg text-gray-400 max-w-2xl mx-auto mt-4 font-light leading-relaxed">
-                    Select the experience that best matches your goal for each session.
-                  </p>
-                </div>
-
-                <div className="grid md:grid-cols-3 gap-4 max-w-5xl mx-auto">
-                  <button
-                    onClick={() => setSelectedMode('focus')}
-                    className={`p-6 rounded-2xl border text-left transition-colors ${
-                      selectedMode === 'focus'
-                        ? 'bg-indigo-500/20 border-indigo-400'
-                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 mb-3">
-                      <span className="text-lg text-indigo-300">🧠</span>
-                      <h3 className="text-lg font-medium text-white">Focus Mode</h3>
-                    </div>
-                    <p className="text-sm text-gray-300 leading-relaxed">
-                      Tracks your emotion and plays music to help you remain focused. If your emotion spikes, the music shifts toward more alertness.
-                    </p>
-                  </button>
-
-                  <button
-                    onClick={() => setSelectedMode('relaxation')}
-                    className={`p-6 rounded-2xl border text-left transition-colors ${
-                      selectedMode === 'relaxation'
-                        ? 'bg-emerald-500/20 border-emerald-400'
-                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 mb-3">
-                      <span className="text-lg text-emerald-300">🍃</span>
-                      <h3 className="text-lg font-medium text-white">Relaxation Mode</h3>
-                    </div>
-                    <p className="text-sm text-gray-300 leading-relaxed">
-                      Helps you exit negative or high-stress emotional states. It detects spikes in stress or sadness and responds with calming, uplifting music.
-                    </p>
-                  </button>
-
-                  <div className="p-6 rounded-2xl border border-gray-800 bg-gray-900/30 opacity-70">
-                    <div className="flex items-center gap-3 mb-3">
-                      <span className="text-lg text-gray-400">✨</span>
-                      <h3 className="text-lg font-medium text-gray-300">Improve Cognitive Power</h3>
-                    </div>
-                    <p className="text-sm text-gray-400 leading-relaxed mb-4">
-                      Planned mode for boosting memory, problem solving, and sustained cognitive performance.
-                    </p>
-                    <span className="inline-block text-xs px-3 py-1 rounded-full bg-gray-800 text-gray-400 border border-gray-700">Coming soon</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {currentStep === 4 && (
+            {currentStep === PAIR_STEP && (
               <div className="text-center space-y-8">
                 <div className="mb-8 rounded-2xl overflow-hidden max-w-lg mx-auto border border-gray-800">
                   <Image
@@ -359,8 +326,74 @@ export default function SetupGuide({
                 )}
               </div>
             )}
+
+            {needsCalibration && currentStep === CAL_STEP && (
+              <CalibrationStep onComplete={() => setCurrentStep(CAL_STEP + 1)} />
+            )}
+
+            {currentStep === MODE_STEP && (
+              <div className="space-y-8">
+                <div className="text-center">
+                  <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-pink-400 to-purple-600 flex items-center justify-center">
+                    <span className="text-4xl">✨</span>
+                  </div>
+                  <h2 className="text-4xl md:text-5xl font-light tracking-tight">Choose Your Mode</h2>
+                  <p className="text-lg text-gray-400 max-w-2xl mx-auto mt-4 font-light leading-relaxed">
+                    Select the experience that best matches your goal for each session.
+                  </p>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-4 max-w-5xl mx-auto">
+                  <button
+                    onClick={() => setSelectedMode('focus')}
+                    className={`p-6 rounded-2xl border text-left transition-colors ${
+                      selectedMode === 'focus'
+                        ? 'bg-indigo-500/20 border-indigo-400'
+                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-indigo-300">🧠</span>
+                      <h3 className="text-lg font-medium text-white">Focus Mode</h3>
+                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed">
+                      Tracks your emotion and plays music to help you remain focused. If your emotion spikes, the music shifts toward more alertness.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setSelectedMode('relaxation')}
+                    className={`p-6 rounded-2xl border text-left transition-colors ${
+                      selectedMode === 'relaxation'
+                        ? 'bg-emerald-500/20 border-emerald-400'
+                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-emerald-300">🍃</span>
+                      <h3 className="text-lg font-medium text-white">Relaxation Mode</h3>
+                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed">
+                      Helps you exit negative or high-stress emotional states. It detects spikes in stress or sadness and responds with calming, uplifting music.
+                    </p>
+                  </button>
+
+                  <div className="p-6 rounded-2xl border border-gray-800 bg-gray-900/30 opacity-70">
+                    <div className="flex items-center gap-3 mb-3">
+                      <span className="text-lg text-gray-400">✨</span>
+                      <h3 className="text-lg font-medium text-gray-300">Improve Cognitive Power</h3>
+                    </div>
+                    <p className="text-sm text-gray-400 leading-relaxed mb-4">
+                      Planned mode for boosting memory, problem solving, and sustained cognitive performance.
+                    </p>
+                    <span className="inline-block text-xs px-3 py-1 rounded-full bg-gray-800 text-gray-400 border border-gray-700">Coming soon</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
+          {currentStep !== CAL_STEP && (
           <div className="flex justify-between mt-10 gap-4">
             <button
               onClick={handleBack}
@@ -390,6 +423,7 @@ export default function SetupGuide({
               <span className="text-sm transition-transform group-hover:translate-x-1">→</span>
             </button>
           </div>
+          )}
         </div>
       </div>
     </div>

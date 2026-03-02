@@ -121,27 +121,30 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   const buildTrackQuery = useCallback((dominantEmotion: string) => {
     const genresText = preferredGenres.length > 0 ? preferredGenres.join(" ") : "instrumental";
     const normalizedEmotion = dominantEmotion.toLowerCase();
+    // Translate user energy preference into search terms
+    const energyWord = focusEnergy === "energetic" ? "upbeat energetic uptempo" : "calm relaxing slow";
 
     if (mode === "relaxation") {
       if (stressEmotions.has(normalizedEmotion)) {
-        return `calming uplifting relaxation ${genresText}`;
+        return `calming uplifting ${energyWord} relaxation ${genresText}`;
       }
       if (positiveEmotions.has(normalizedEmotion)) {
-        return `gentle relaxing ${genresText}`;
+        return `gentle ${energyWord} relaxing ${genresText}`;
       }
-      return `peaceful anti stress ${genresText}`;
+      return `peaceful anti-stress ${energyWord} ${genresText}`;
     }
 
-    // Focus mode logic
+    // Focus mode
     if (stressEmotions.has(normalizedEmotion)) {
-      return `calm focus ${genresText}`;
+      // When stressed, counter with calming music regardless of energy pref
+      return `calming soothing focus ${genresText}`;
     }
 
     if (focusEnergy === "energetic") {
-      return `energetic deep focus ${genresText}`;
+      return `energetic upbeat high-energy deep focus ${genresText}`;
     }
 
-    return `calm deep focus ${genresText}`;
+    return `calm slow relaxing deep focus ${genresText}`;
   }, [focusEnergy, mode, preferredGenres]);
 
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
@@ -306,17 +309,16 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
             if (activeTrackUriRef.current !== trackUri) return;
             void queueNextTrackFromSummary(trackUri);
           }, remainingMs + 750);
-        } else if (typedState.paused) {
-          // Track is paused — cancel the timer so it doesn't auto-skip.
-          if (trackEndTimerRef.current) {
-            clearTimeout(trackEndTimerRef.current);
-            trackEndTimerRef.current = null;
-          }
         }
+        // IMPORTANT: Do NOT cancel the timer when paused.
+        // The Spotify SDK fires player_state_changed with paused=true, position=0
+        // when a track ends naturally (it loops back to start). Cancelling the timer
+        // here would prevent the next song from ever being queued.
+        // The timer is self-guarded: if (activeTrackUriRef.current !== trackUri) return.
 
-        // Only treat as ended when position genuinely reaches the end while playing.
-        const hasEnded = !typedState.paused && typedState.duration > 0 &&
-          typedState.position >= typedState.duration - 300;
+        // Also detect end via position proximity (fires before the timer if lag is small)
+        const hasEnded = typedState.duration > 0 &&
+          typedState.position >= typedState.duration - 1500;
         if (hasEnded) {
           void queueNextTrackFromSummary(trackUri);
         }

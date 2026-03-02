@@ -1,0 +1,29 @@
+{
+  "n_features": 105,
+  "classes": [
+    "Like (0)",
+    "Dislike (1)"
+  ],
+  "fs": 128,
+  "n_eeg_channels": 4,
+  "window_samples": 512,
+  "window_seconds": 4,
+  "balanced_accuracy": 79.748,
+  "roc_auc": 0.8827,
+  "val_ba": 79.6447,
+  "trained_on": "emognition_full.npz \u2014 41 participants",
+  "feature_order": [
+    "band_power_20",
+    "diff_entropy_20",
+    "alpha_beta_ratio_4",
+    "theta_alpha_ratio_4",
+    "faa_alpha_theta_beta_3",
+    "engagement_index_4",
+    "spectral_centroid_4",
+    "hjorth_mob_4",
+    "hjorth_comp_4",
+    "coherence_30",
+    "psd_entropy_4",
+    "peak_frequency_4"
+  ]
+}

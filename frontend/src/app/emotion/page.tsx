@@ -32,15 +32,18 @@ export default function EmotionPage() {
   const [isPaused, setIsPaused] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
-  
+  const [likeDislikeData, setLikeDislikeData] = useState<{ label: string; probability: number; confidence: number } | null>(null);
+
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const playerRef = useRef<PlayerRef>(null);
   const testModeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSampleTimeRef = useRef<number>(0);   // epoch ms of last received EEG sample
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Initialize WebSocket connection (skip in test mode — backend is not needed)
   useEffect(() => {
-    if (localStorage.getItem('neurovibe_test_mode') === 'true') return;
+    if (sessionStorage.getItem('neurovibe_test_mode') === 'true') return;
 
     socketRef.current = io('http://localhost:5000', {
       transports: ['websocket'],
@@ -48,6 +51,11 @@ export default function EmotionPage() {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5
+    });
+
+    // Listen for like/dislike predictions
+    socketRef.current.on('likedislike_prediction', (data: { label: string; probability: number; confidence: number }) => {
+      setLikeDislikeData(data);
     });
 
     // Listen for emotion predictions
@@ -90,7 +98,7 @@ export default function EmotionPage() {
   // Prompt user to connect Muse (always show on page load)
   useEffect(() => {
     // If test mode is active, don't show the connect prompt — handled below
-    if (localStorage.getItem('neurovibe_test_mode') === 'true') return;
+    if (sessionStorage.getItem('neurovibe_test_mode') === 'true') return;
 
     const justCompletedSetup = sessionStorage.getItem('neurovibe_just_setup');
     
@@ -109,7 +117,7 @@ export default function EmotionPage() {
 
   // Test mode: skip headset connection and cycle through demo emotions
   useEffect(() => {
-    const isTestMode = localStorage.getItem('neurovibe_test_mode') === 'true';
+    const isTestMode = sessionStorage.getItem('neurovibe_test_mode') === 'true';
     if (!isTestMode) return;
 
     console.log('🧪 Test mode active — simulating EEG emotions');
@@ -167,32 +175,76 @@ export default function EmotionPage() {
       
       // Subscribe to EEG data
       let localSampleCount = 0;
-      zipSamples(clientRef.current.eegReadings).subscribe(reading => {
-        const eegData: EEGData = {
-          tp9: reading.data[0],
-          af7: reading.data[1],
-          af8: reading.data[2],
-          tp10: reading.data[3],
-          timestamp: reading.timestamp
-        };
-        
-        // Update visualization buffer (keep last 512 samples for display)
-        setEegDataBuffer(prev => {
-          const updated = [...prev, eegData];
-          return updated.slice(-512); // Keep only last 512 samples
-        });
-        
-        // Send to backend via WebSocket
-        if (socketRef.current?.connected) {
-          socketRef.current.emit('eeg_sample', eegData);
-          localSampleCount++;
-          setSampleCount(localSampleCount);
-          
-          if (localSampleCount % 256 === 0) {
-            console.log(`✓ Sent ${localSampleCount} samples to backend`);
+      lastSampleTimeRef.current = Date.now(); // reset watchdog on fresh connect
+      zipSamples(clientRef.current.eegReadings).subscribe({
+        next: (reading) => {
+          const eegData: EEGData = {
+            tp9: reading.data[0],
+            af7: reading.data[1],
+            af8: reading.data[2],
+            tp10: reading.data[3],
+            timestamp: reading.timestamp
+          };
+
+          lastSampleTimeRef.current = Date.now(); // stamp every received sample
+
+          // Update visualization buffer (keep last 512 samples for display)
+          setEegDataBuffer(prev => {
+            const updated = [...prev, eegData];
+            return updated.slice(-512);
+          });
+
+          // Send to backend via WebSocket
+          if (socketRef.current?.connected) {
+            socketRef.current.emit('eeg_sample', eegData);
+            localSampleCount++;
+            setSampleCount(localSampleCount);
+
+            if (localSampleCount % 256 === 0) {
+              console.log(`✓ Sent ${localSampleCount} samples to backend`);
+            }
           }
-        }
+        },
+        error: (err) => {
+          console.error('EEG subscription error:', err);
+          setConnectionStatus('EEG stream error — try reconnecting');
+          setIsConnected(false);
+          setNeedsConnect(true);
+        },
       });
+
+      // Watchdog: if no EEG sample arrives for >15 s while supposedly connected,
+      // flag to the user that the signal may have been lost.
+      if (watchdogRef.current) clearInterval(watchdogRef.current);
+      watchdogRef.current = setInterval(() => {
+        const elapsed = Date.now() - lastSampleTimeRef.current;
+        if (elapsed > 15_000 && lastSampleTimeRef.current > 0) {
+          console.warn(`⚠️  No EEG samples for ${Math.round(elapsed / 1000)}s`);
+          setConnectionStatus('⚠️ EEG signal lost — disconnect and reconnect the headset');
+          setIsConnected(false);
+          setNeedsConnect(true);
+          clearInterval(watchdogRef.current!);
+          watchdogRef.current = null;
+        }
+      }, 10_000);
+
+      // Subscribe to PPG data (Muse 2 only — photoplethysmography for heart rate)
+      // ppgReadings emits packets of ~6 samples at ~64 Hz per channel
+      if (clientRef.current.ppgReadings) {
+        clientRef.current.ppgReadings.subscribe(reading => {
+          if (!socketRef.current?.connected) return;
+          // Use channel 0 (ambient-light-compensated) for HRV; emit each sample
+          reading.samples.forEach((value: number) => {
+            if (value !== null && !isNaN(value)) {
+              socketRef.current!.emit('ppg_sample', {
+                value,
+                timestamp: reading.timestamp,
+              });
+            }
+          });
+        });
+        console.log('✓ PPG subscription active (Muse 2 heart rate)');
+      }
     } catch (error: any) {
       console.error('Failed to reconnect Muse:', error);
       
@@ -211,7 +263,7 @@ export default function EmotionPage() {
   };
 
   const handlePauseToggle = () => {
-    const isTestMode = localStorage.getItem('neurovibe_test_mode') === 'true';
+    const isTestMode = sessionStorage.getItem('neurovibe_test_mode') === 'true';
 
     if (isPaused) {
       if (isTestMode) {
@@ -235,6 +287,10 @@ export default function EmotionPage() {
         clearInterval(testModeIntervalRef.current);
         testModeIntervalRef.current = null;
       }
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+        watchdogRef.current = null;
+      }
       if (clientRef.current) {
         clientRef.current.disconnect();
       }
@@ -250,7 +306,12 @@ export default function EmotionPage() {
       clearInterval(testModeIntervalRef.current);
       testModeIntervalRef.current = null;
     }
+    if (watchdogRef.current) {
+      clearInterval(watchdogRef.current);
+      watchdogRef.current = null;
+    }
     localStorage.removeItem('neurovibe_test_mode');
+    sessionStorage.removeItem('neurovibe_test_mode');
 
     // Pause music
     if (playerRef.current) {
@@ -284,21 +345,38 @@ export default function EmotionPage() {
   };
 
   return (
-    <EmotionView
-      predictedEmotion={predictedEmotion}
-      predictedVAD={predictedVAD}
-      isUsingMusePrediction={true}
-      sampleCount={sampleCount}
-      connectionStatus={connectionStatus}
-      onPauseToggle={handlePauseToggle}
-      isPaused={isPaused}
-      needsConnect={needsConnect}
-      isConnecting={isConnecting}
-      onConnect={handleConnectMuse}
-      eegData={eegDataBuffer}
-      onExitToHome={handleExitToHome}
-      onBackToHome={handleBackToHome}
-      playerRef={playerRef}
-    />
+    <div className="relative">
+      {likeDislikeData && (
+        <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl border backdrop-blur-md text-sm font-light shadow-xl"
+          style={{
+            background: likeDislikeData.label === 'like' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+            borderColor: likeDislikeData.label === 'like' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)',
+            color: likeDislikeData.label === 'like' ? '#86efac' : '#fca5a5',
+          }}
+        >
+          <span className="text-lg">{likeDislikeData.label === 'like' ? '👍' : '👎'}</span>
+          <div>
+            <p className="font-medium capitalize">{likeDislikeData.label}ing this</p>
+            <p className="text-xs opacity-70">{Math.round(likeDislikeData.probability * 100)}% confidence</p>
+          </div>
+        </div>
+      )}
+      <EmotionView
+        predictedEmotion={predictedEmotion}
+        predictedVAD={predictedVAD}
+        isUsingMusePrediction={true}
+        sampleCount={sampleCount}
+        connectionStatus={connectionStatus}
+        onPauseToggle={handlePauseToggle}
+        isPaused={isPaused}
+        needsConnect={needsConnect}
+        isConnecting={isConnecting}
+        onConnect={handleConnectMuse}
+        eegData={eegDataBuffer}
+        onExitToHome={handleExitToHome}
+        onBackToHome={handleBackToHome}
+        playerRef={playerRef}
+      />
+    </div>
   );
 }

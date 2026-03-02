@@ -116,6 +116,22 @@ export default function MuseConnector({ onEmotionPredicted }: MuseConnectorProps
           console.warn('⚠️ WebSocket not connected, sample not sent');
         }
       });
+
+      // Subscribe to PPG data (Muse 2 only — photoplethysmography for heart rate)
+      if (clientRef.current.ppgReadings) {
+        clientRef.current.ppgReadings.subscribe(reading => {
+          if (!socketRef.current?.connected) return;
+          reading.samples.forEach((value: number) => {
+            if (value !== null && !isNaN(value)) {
+              socketRef.current!.emit('ppg_sample', {
+                value,
+                timestamp: reading.timestamp,
+              });
+            }
+          });
+        });
+        console.log('✓ PPG subscription active (Muse 2 heart rate)');
+      }
       
     } catch (error) {
       console.error('Connection failed:', error);
@@ -182,7 +198,7 @@ export default function MuseConnector({ onEmotionPredicted }: MuseConnectorProps
       <div className="text-xs text-gray-500 space-y-1">
         <p>• Make sure your Muse headset is on and nearby</p>
         <p>• Backend server must be running on localhost:5000</p>
-        <p>• Prediction updates every ~60 seconds (15360 samples)</p>
+        <p>• Prediction updates every ~5 seconds (rule-based) or longer for ML models</p>
       </div>
     </div>
   );

@@ -32,6 +32,7 @@ export default function EmotionPage() {
   const [isPaused, setIsPaused] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
+  const [ppgDataBuffer, setPpgDataBuffer] = useState<number[]>([]);  // for local PPG waveform
   const [likeDislikeData, setLikeDislikeData] = useState<{ label: string; probability: number; confidence: number } | null>(null);
 
   const clientRef = useRef<MuseClient | null>(null);
@@ -232,15 +233,20 @@ export default function EmotionPage() {
       // ppgReadings emits packets of ~6 samples at ~64 Hz per channel
       if (clientRef.current.ppgReadings) {
         clientRef.current.ppgReadings.subscribe(reading => {
-          if (!socketRef.current?.connected) return;
-          // Use channel 0 (ambient-light-compensated) for HRV; emit each sample
           reading.samples.forEach((value: number) => {
-            if (value !== null && !isNaN(value)) {
+            if (value === null || isNaN(value)) return;
+            // Forward to backend for emotion scoring
+            if (socketRef.current?.connected) {
               socketRef.current!.emit('ppg_sample', {
                 value,
                 timestamp: reading.timestamp,
               });
             }
+            // Store locally for PPG waveform visualization (last 512 samples)
+            setPpgDataBuffer(prev => {
+              const updated = [...prev, value];
+              return updated.length > 512 ? updated.slice(-512) : updated;
+            });
           });
         });
         console.log('✓ PPG subscription active (Muse 2 heart rate)');
@@ -373,6 +379,7 @@ export default function EmotionPage() {
         isConnecting={isConnecting}
         onConnect={handleConnectMuse}
         eegData={eegDataBuffer}
+        ppgData={ppgDataBuffer}
         onExitToHome={handleExitToHome}
         onBackToHome={handleBackToHome}
         playerRef={playerRef}

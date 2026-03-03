@@ -76,6 +76,8 @@ LD_BUFFER_SIZE = 1024   # 4 s @ 256 Hz — matches model window
 SAMPLE_RATE = 256
 is_processing = False  # Flag to prevent multiple simultaneous predictions
 ld_is_processing = False
+ld_last_emit_time: float = 0.0  # epoch time of last likedislike_prediction emit
+LD_EMIT_INTERVAL = 60.0         # seconds between badge updates
 
 # Emotion log: list of (wall_clock_time, emotion_string) recorded each prediction
 emotion_log: list = []
@@ -340,7 +342,7 @@ def _run_ld_prediction(window_samples: list) -> None:
     ld_is_processing = True
 
     def _predict():
-        global ld_is_processing
+        global ld_is_processing, ld_last_emit_time
         try:
             win = np.array(
                 [
@@ -352,7 +354,11 @@ def _run_ld_prediction(window_samples: list) -> None:
                 dtype=np.float32,
             )
             result = ld_predictor.predict(win)
-            socketio.emit("likedislike_prediction", result)
+            # Throttle: only emit to frontend once per minute
+            now = time.time()
+            if now - ld_last_emit_time >= LD_EMIT_INTERVAL:
+                socketio.emit("likedislike_prediction", result)
+                ld_last_emit_time = now
         except Exception as ex:
             print(f"⚠️  Like/dislike prediction error: {ex}")
         finally:

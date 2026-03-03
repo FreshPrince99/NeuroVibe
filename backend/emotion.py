@@ -158,11 +158,12 @@ def extract_ppg_features(
         # Normalise
         arr = (arr - arr.mean()) / (arr.std() + 1e-8)
 
-        # Smooth with a ~80 ms moving average
-        win = max(1, int(0.08 * fs))
+        # Smooth with a ~100 ms moving average (wider window reduces noise on Muse 2 PPG)
+        win = max(1, int(0.10 * fs))
         smooth = np.convolve(arr, np.ones(win) / win, mode="same")
 
-        thresh = smooth.mean() + 0.3 * smooth.std()
+        # Lower threshold (0.2 × std) increases sensitivity on wrist-based PPG
+        thresh = smooth.mean() + 0.2 * smooth.std()
 
         # Naive peak detection: interior maxima above threshold
         peaks = np.where(
@@ -180,6 +181,9 @@ def extract_ppg_features(
         for p in peaks[1:]:
             if p - filtered[-1] >= min_dist:
                 filtered.append(int(p))
+            elif smooth[p] > smooth[filtered[-1]]:
+                # Same inter-peak interval but this peak is higher — replace previous
+                filtered[-1] = int(p)
 
         if len(filtered) < 2:
             return PPGFeatures(available=False)
@@ -189,6 +193,11 @@ def extract_ppg_features(
 
         # Physiological sanity check
         if not (30.0 < bpm < 200.0):
+            return PPGFeatures(available=False)
+
+        # Reject intervals with extreme variability (motion artifact)
+        cv = rri_s.std() / (rri_s.mean() + 1e-8)
+        if cv > 0.40:
             return PPGFeatures(available=False)
 
         rmssd = float(np.sqrt(np.mean(np.diff(rri_s * 1000.0) ** 2)))  # ms
@@ -279,7 +288,7 @@ class RuleBasedEmotionPredictor:
 
         # ── RELAXED ───────────────────────────────────────────────────────
         # Evidence for: elevated alpha (>15%), low beta, negative FAA
-        sc["relaxed"] += 0.35 * min(ra  / 0.18, 1.0)             # alpha > 18 %
+        sc["relaxed"] += 0.35 * min(ra  / 0.15, 1.0)             # alpha > 15 % (was 18%)
         sc["relaxed"] += 0.30 * min(max(-faa, 0.0) / 0.8, 1.0)   # negative FAA → calm
         sc["relaxed"] += 0.20 * max(0.0, 1.0 - thr / 2.0)        # low theta/alpha
         sc["relaxed"] += 0.15 * max(0.0, 1.0 - rb  / 0.12)       # low beta
@@ -290,10 +299,14 @@ class RuleBasedEmotionPredictor:
         # which is incompatible with fatigue. Gate the entire tired score by beta activity.
         #   fatigue_gate → 1.0 when rb = 0   (no beta → could be tired)
         #   fatigue_gate → 0.0 when rb ≥ 10% (beta present → clearly awake/activated)
-        fatigue_gate = max(0.0, 1.0 - min(rb / 0.10, 1.0))
-        sc["tired"] += 0.45 * min(thr / 3.0, 1.0) * fatigue_gate   # thr > 3 AND low beta
-        sc["tired"] += 0.35 * min(rt  / 0.32, 1.0) * fatigue_gate  # high theta AND low beta
-        sc["tired"] += 0.20 * max(0.0, 1.0 - ra  / 0.12)           # low alpha (not gated)
+        fatigue_gate    = max(0.0, 1.0 - min(rb / 0.10, 1.0))
+        # alpha_supp_gate: suppresses tired when alpha is reasonably present (relaxed state)
+        # At ra=14% gate=0 (no tired); at ra=7% gate=0.5; at ra=0 gate=1.0
+        alpha_supp_gate = max(0.0, 1.0 - min(ra / 0.14, 1.0))
+        tired_gate      = fatigue_gate * alpha_supp_gate           # BOTH conditions required
+        sc["tired"] += 0.45 * min(thr / 3.0, 1.0) * tired_gate   # thr > 3 AND low beta AND low alpha
+        sc["tired"] += 0.35 * min(rt  / 0.32, 1.0) * tired_gate  # high theta AND low beta AND low alpha
+        sc["tired"] += 0.20 * max(0.0, 1.0 - ra  / 0.08)         # extreme alpha suppression (<8% only)
 
         # ── PPG / cardiovascular adjustments ──────────────────────────────
         # HR is a STRONG physiological signal — weight it heavily.
@@ -334,11 +347,15 @@ class RuleBasedEmotionPredictor:
             # High HRV  = parasympathetic dominance → relaxed / resting
             # Low HRV   = sympathetic dominance → stress / high arousal
             if rmssd > 60:
-                sc["relaxed"] += 0.15
+                sc["relaxed"] += 0.18
                 sc["stress"]  -= 0.10
             elif rmssd > 40:
-                sc["relaxed"] += 0.08
+                sc["relaxed"] += 0.12
                 sc["stress"]  -= 0.04
+            elif rmssd > 25:
+                # Moderate HRV — mildly parasympathetic, lean relaxed over tired
+                sc["relaxed"] += 0.06
+                sc["tired"]   -= 0.04
             elif rmssd < 15:
                 sc["stress"]  += 0.18
                 sc["relaxed"] -= 0.10

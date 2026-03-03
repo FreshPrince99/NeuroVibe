@@ -12,10 +12,12 @@ interface EEGData {
 interface EEGVisualizationProps {
   eegData: EEGData[];
   maxDataPoints?: number;
+  ppgData?: number[];   // raw PPG samples from Muse 2 (optional)
 }
 
-export default function EEGVisualization({ eegData, maxDataPoints = 512 }: EEGVisualizationProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+export default function EEGVisualization({ eegData, maxDataPoints = 512, ppgData = [] }: EEGVisualizationProps) {
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
+  const ppgCanvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -129,6 +131,70 @@ export default function EEGVisualization({ eegData, maxDataPoints = 512 }: EEGVi
 
   }, [eegData, maxDataPoints]);
 
+  // ── PPG canvas rendering ──────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = ppgCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr  = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = rect.width  * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    if (ppgData.length < 2) {
+      ctx.fillStyle = '#666666';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Waiting for PPG data…', rect.width / 2, rect.height / 2);
+      return;
+    }
+
+    const display = ppgData.slice(-maxDataPoints);
+    const minVal  = Math.min(...display);
+    const maxVal  = Math.max(...display);
+    const range   = (maxVal - minVal) || 1;
+    const pad     = range * 0.15;
+
+    // Label
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('PPG', 10, 18);
+
+    // Waveform
+    ctx.strokeStyle = '#ec4899';   // pink
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    display.forEach((val, i) => {
+      const x    = (i / (display.length - 1)) * rect.width;
+      const norm = (val - minVal + pad) / (range + 2 * pad);
+      const y    = rect.height - norm * rect.height * 0.85 - rect.height * 0.05;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Centre line
+    ctx.strokeStyle = '#444444';
+    ctx.lineWidth   = 0.5;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(0, rect.height / 2);
+    ctx.lineTo(rect.width, rect.height / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Border
+    ctx.strokeStyle = '#555555';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(0, 0, rect.width, rect.height);
+  }, [ppgData, maxDataPoints]);
+
   return (
     <div className="w-full h-full flex flex-col gap-2">
       <div className="flex items-center justify-between px-4">
@@ -142,7 +208,22 @@ export default function EEGVisualization({ eegData, maxDataPoints = 512 }: EEGVi
       <canvas
         ref={canvasRef}
         className="w-full flex-1 rounded-lg"
-        style={{ minHeight: '300px' }}
+        style={{ minHeight: '200px' }}
+      />
+
+      {/* PPG waveform panel */}
+      <div className="flex items-center justify-between px-4 pt-2">
+        <h3 className="text-base font-semibold text-pink-400">
+          PPG — Heart Rate
+        </h3>
+        <span className="text-sm text-gray-600 dark:text-gray-400">
+          {ppgData.length} samples
+        </span>
+      </div>
+      <canvas
+        ref={ppgCanvasRef}
+        className="w-full rounded-lg"
+        style={{ height: '80px' }}
       />
     </div>
   );

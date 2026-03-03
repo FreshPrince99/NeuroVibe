@@ -208,6 +208,8 @@ export default function CalibrationStep({ onComplete }: Props) {
   const [statusMsg, setStatusMsg]       = useState('');
   const [errorMsg, setErrorMsg]         = useState('');
   const [isSaving, setIsSaving]         = useState(false);
+  const [recCount, setRecCount]         = useState(0);      // live sample count during song_playing
+  const [dropoutWarning, setDropoutWarning] = useState(false); // BLE silent-stop warning
   // Songs are picked once at mount based on the user's genre preferences
   const [songs, setSongsState]          = useState<Song[]>([]);
   const [resolvedIds, setResolvedIds]   = useState<string[]>([]);
@@ -236,6 +238,10 @@ export default function CalibrationStep({ onComplete }: Props) {
   const museRef      = useRef<MuseClient | null>(null);
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const phaseRef     = useRef<Phase>('instructions');
+  // Tracks last EEG sample arrival time (updated on every sample — used by dropout watchdog)
+  const lastCalSampleRef  = useRef<number>(0);
+  // Interval that refreshes the on-screen sample count + checks for BLE dropout
+  const recDisplayRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Keep phaseRef in sync with phase state (needed inside intervals/subscriptions)
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -243,7 +249,8 @@ export default function CalibrationStep({ onComplete }: Props) {
   // ── cleanup on unmount ──────────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      timerRef.current && clearInterval(timerRef.current);
+      timerRef.current    && clearInterval(timerRef.current);
+      recDisplayRef.current && clearInterval(recDisplayRef.current);
       museRef.current?.disconnect();
     };
   }, []);
@@ -265,21 +272,41 @@ export default function CalibrationStep({ onComplete }: Props) {
     }
 
     // Subscribe to EEG — samples are routed depending on current phase
-    zipSamples(museRef.current.eegReadings).subscribe(reading => {
-      const sample: EEGSample = {
-        tp9:  reading.data[0] ?? 0,
-        af7:  reading.data[1] ?? 0,
-        af8:  reading.data[2] ?? 0,
-        tp10: reading.data[3] ?? 0,
-      };
+    zipSamples(museRef.current.eegReadings).subscribe({
+      next: (reading) => {
+        // Always stamp the last-received time so the watchdog knows the stream is alive
+        lastCalSampleRef.current = Date.now();
 
-      const p = phaseRef.current;
-      if (p === 'baseline') {
-        baselineBuf.current.push(sample);
-      } else if (p === 'song_playing') {
-        // songIndex is captured via ref below
-        songBufs.current[songIndexRef.current].push(sample);
-      }
+        const sample: EEGSample = {
+          tp9:  reading.data[0] ?? 0,
+          af7:  reading.data[1] ?? 0,
+          af8:  reading.data[2] ?? 0,
+          tp10: reading.data[3] ?? 0,
+        };
+
+        const p = phaseRef.current;
+        if (p === 'baseline') {
+          baselineBuf.current.push(sample);
+        } else if (p === 'song_playing') {
+          // songIndex is captured via ref below
+          songBufs.current[songIndexRef.current].push(sample);
+        }
+      },
+      error: (err) => {
+        console.error('[CalibrationStep] EEG stream error:', err);
+        // Only surface the error if we haven't already finished or errored
+        const curPhase = phaseRef.current;
+        if (curPhase !== 'done' && curPhase !== 'saving' && curPhase !== 'error') {
+          setErrorMsg(
+            'EEG stream disconnected unexpectedly. ' +
+            'Please disconnect and reconnect your headset, then try again.'
+          );
+          setPhase('error');
+        }
+      },
+      complete: () => {
+        console.log('[CalibrationStep] EEG stream completed.');
+      },
     });
 
     // Start baseline once connected
@@ -328,19 +355,40 @@ export default function CalibrationStep({ onComplete }: Props) {
   const startSong = useCallback(() => {
     setPhase('song_playing');
     setTimer(SONG_SECONDS);
+    setRecCount(0);
+    setDropoutWarning(false);
+
+    // ── Recording display + dropout watchdog (runs every 600 ms) ────────────
+    // Reads the live buffer length so the user can see samples accumulating.
+    // If no new sample has arrived for >6 s the headset has silently disconnected.
+    if (recDisplayRef.current) clearInterval(recDisplayRef.current);
+    recDisplayRef.current = setInterval(() => {
+      const n = songBufs.current[songIndexRef.current]?.length ?? 0;
+      setRecCount(n);
+      const msSinceLast = Date.now() - lastCalSampleRef.current;
+      if (lastCalSampleRef.current > 0 && msSinceLast > 6_000) {
+        setDropoutWarning(true);
+      }
+    }, 600);
 
     timerRef.current = setInterval(() => {
       setTimer(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current!);
           timerRef.current = null;
+          // Stop the recording display interval when the song ends
+          if (recDisplayRef.current) {
+            clearInterval(recDisplayRef.current);
+            recDisplayRef.current = null;
+          }
+          setDropoutWarning(false);
           setPhase('song_vote');
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── like / dislike vote ─────────────────────────────────────────────────
   const handleVote = useCallback((label: 0 | 1) => {
@@ -581,7 +629,7 @@ export default function CalibrationStep({ onComplete }: Props) {
           {/* ── Song Playing controls ── */}
           {phase === 'song_playing' && (
             <div className="space-y-4">
-              {/* Countdown ring overlaid below the player */}
+              {/* Countdown ring + live sample counter */}
               <div className="flex items-center justify-center gap-4">
                 <div className="relative w-16 h-16 flex-shrink-0">
                   <div className="absolute inset-0 rounded-full border-4 border-gray-800" />
@@ -593,14 +641,38 @@ export default function CalibrationStep({ onComplete }: Props) {
                     <span className="text-lg font-light text-white tabular-nums">{timer}</span>
                   </div>
                 </div>
-                <p className="text-gray-400 text-sm font-light">
-                  🧠 Recording your brain response… Keep listening.
-                </p>
+                <div className="text-left">
+                  <p className="text-gray-400 text-sm font-light">
+                    🧠 Recording your brain response… Keep listening.
+                  </p>
+                  {/* Live sample counter — turns green once data is flowing */}
+                  <p className={`text-xs mt-0.5 tabular-nums font-mono ${
+                    recCount > 0 ? 'text-green-400' : 'text-gray-600'
+                  }`}>
+                    {recCount > 0
+                      ? `📡 ${recCount} samples recorded`
+                      : '📡 Waiting for EEG data…'}
+                  </p>
+                </div>
               </div>
+
+              {/* Dropout warning — only shown if stream goes silent */}
+              {dropoutWarning && (
+                <div className="bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-xs text-red-300 font-light text-center">
+                  ⚠️ No EEG data received for several seconds. Your headset may have disconnected.
+                  <br />Try adjusting the headset position or restarting calibration.
+                </div>
+              )}
+
               <button
                 onClick={() => {
                   timerRef.current && clearInterval(timerRef.current);
                   timerRef.current = null;
+                  if (recDisplayRef.current) {
+                    clearInterval(recDisplayRef.current);
+                    recDisplayRef.current = null;
+                  }
+                  setDropoutWarning(false);
                   setPhase('song_vote');
                 }}
                 className="text-xs text-gray-600 hover:text-gray-400 underline transition-colors"
@@ -683,12 +755,16 @@ export default function CalibrationStep({ onComplete }: Props) {
           <div className="flex gap-4 justify-center">
             <button
               onClick={() => {
+                // Stop any running intervals
+                if (recDisplayRef.current) { clearInterval(recDisplayRef.current); recDisplayRef.current = null; }
                 setPhase('instructions');
                 baselineBuf.current = [];
                 songBufs.current    = [[], [], []];
                 songLabels.current  = [];
                 setSongIndex(0);
                 setErrorMsg('');
+                setRecCount(0);
+                setDropoutWarning(false);
               }}
               className="px-6 py-2 rounded-full border border-gray-700 text-gray-400 hover:border-gray-500 text-sm font-light transition-colors"
             >

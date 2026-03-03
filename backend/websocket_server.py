@@ -211,7 +211,11 @@ def handle_eeg_sample(data):
                 }
 
                 # Snapshot PPG buffer for this prediction window
-                ppg_snapshot = np.array(ppg_buffer, dtype=np.float64) if ppg_buffer else None
+                # Use the most recent ~10 s of PPG for stable HR/HRV
+                if ppg_buffer:
+                    ppg_snapshot = np.array(ppg_buffer[-640:], dtype=np.float64)  # 64 Hz * 10 s
+                else:
+                    ppg_snapshot = None
 
                 # Calculate channel averages for display
                 channel_means = {k.upper(): float(np.mean(v)) for k, v in channels_data.items()}
@@ -270,9 +274,16 @@ def handle_eeg_sample(data):
 
                 elif args.model == 'rule' and scores is not None:
                     sd = scores.as_dict()
+                    raw_dominant = scores.dominant
+                    try:
+                        hist = predictor.get_history()
+                    except Exception:
+                        hist = []
                     for em, sc_val in sorted(sd.items(), key=lambda x: -x[1]):
                         bar_len = max(1, int(sc_val * 20))
                         print(f"   {em:<8} {'█' * bar_len:<20} {sc_val:.3f}")
+                    if hist:
+                        print(f"   raw: {raw_dominant.upper()}   smooth: {emotion.upper()}   history: {hist}")
                     if ppg_info:
                         print(f"   HR: {ppg_info['bpm']} bpm   RMSSD: {ppg_info['rmssd']} ms")
 

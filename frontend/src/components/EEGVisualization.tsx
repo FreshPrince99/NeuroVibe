@@ -13,9 +13,10 @@ interface EEGVisualizationProps {
   eegData: EEGData[];
   maxDataPoints?: number;
   ppgData?: number[];   // raw PPG samples from Muse 2 (optional)
+  ppgAvailable?: boolean | null;
 }
 
-export default function EEGVisualization({ eegData, maxDataPoints = 512, ppgData = [] }: EEGVisualizationProps) {
+export default function EEGVisualization({ eegData, maxDataPoints = 512, ppgData = [], ppgAvailable = null }: EEGVisualizationProps) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const ppgCanvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -147,6 +148,14 @@ export default function EEGVisualization({ eegData, maxDataPoints = 512, ppgData
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, rect.width, rect.height);
 
+    if (ppgAvailable === false) {
+      ctx.fillStyle = '#666666';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('PPG not available (Muse 2 only)', rect.width / 2, rect.height / 2);
+      return;
+    }
+
     if (ppgData.length < 2) {
       ctx.fillStyle = '#666666';
       ctx.font = '14px sans-serif';
@@ -193,7 +202,7 @@ export default function EEGVisualization({ eegData, maxDataPoints = 512, ppgData
     ctx.strokeStyle = '#555555';
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, rect.width, rect.height);
-  }, [ppgData, maxDataPoints]);
+  }, [ppgData, ppgAvailable, maxDataPoints]);
 
   return (
     <div className="w-full h-full flex flex-col gap-2">

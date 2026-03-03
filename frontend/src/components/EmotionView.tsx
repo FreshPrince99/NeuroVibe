@@ -28,6 +28,7 @@ interface EmotionViewProps {
   onConnect?: () => void;
   eegData?: EEGData[];
   ppgData?: number[];   // raw PPG samples from Muse 2
+  ppgAvailable?: boolean | null;
   onExitToHome?: () => void;
   onBackToHome?: () => void;
   playerRef?: React.RefObject<PlayerRef | null>;
@@ -46,6 +47,7 @@ export default function EmotionView({
   onConnect,
   eegData = [],
   ppgData = [],
+  ppgAvailable = null,
   onExitToHome,
   onBackToHome,
   playerRef
@@ -267,7 +269,7 @@ export default function EmotionView({
 
         {/* Bottom Section - EEG + PPG Visualization */}
         <div className="border-t border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950" style={{ height: '460px' }}>
-          <EEGVisualization eegData={eegData} ppgData={ppgData} maxDataPoints={512} />
+          <EEGVisualization eegData={eegData} ppgData={ppgData} ppgAvailable={ppgAvailable} maxDataPoints={512} />
         </div>
       </main>
     </div>

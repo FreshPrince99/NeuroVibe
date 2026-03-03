@@ -21,7 +21,7 @@ emotion, scores = predictor.predict_emotion(channels_data, ppg_data=ppg_array)
 """
 
 import numpy as np
-from scipy.signal import welch
+from scipy.signal import welch, find_peaks, butter, filtfilt
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -151,59 +151,42 @@ def extract_ppg_features(
         return PPGFeatures(available=False)
 
     arr = np.asarray(ppg_array, dtype=np.float64)
-    if arr.size < int(2 * fs):
+    if arr.size < int(4 * fs):
         return PPGFeatures(available=False)
 
     try:
-        # Normalise
         arr = (arr - arr.mean()) / (arr.std() + 1e-8)
 
-        # Smooth with a ~100 ms moving average (wider window reduces noise on Muse 2 PPG)
-        win = max(1, int(0.10 * fs))
-        smooth = np.convolve(arr, np.ones(win) / win, mode="same")
+        # Band-pass filter for typical heart rates (0.7–3.0 Hz ≈ 42–180 bpm)
+        try:
+            b, a = butter(2, [0.7, 3.0], btype="bandpass", fs=fs)
+            filt = filtfilt(b, a, arr)
+        except Exception:
+            filt = arr
 
-        # Lower threshold (0.2 × std) increases sensitivity on wrist-based PPG
-        thresh = smooth.mean() + 0.2 * smooth.std()
+        filt = (filt - filt.mean()) / (filt.std() + 1e-8)
+        min_dist = int(0.35 * fs)  # ≥ 350 ms between peaks
+        prominence = 0.4 * np.std(filt)
+        peaks, _ = find_peaks(filt, distance=min_dist, prominence=prominence)
 
-        # Naive peak detection: interior maxima above threshold
-        peaks = np.where(
-            (smooth[1:-1] > thresh)
-            & (smooth[1:-1] > smooth[:-2])
-            & (smooth[1:-1] > smooth[2:])
-        )[0] + 1
-
-        if len(peaks) < 2:
+        if len(peaks) < 3:
             return PPGFeatures(available=False)
 
-        # Enforce minimum inter-peak distance of 300 ms (≤ 200 bpm)
-        min_dist = int(0.3 * fs)
-        filtered: list[int] = [int(peaks[0])]
-        for p in peaks[1:]:
-            if p - filtered[-1] >= min_dist:
-                filtered.append(int(p))
-            elif smooth[p] > smooth[filtered[-1]]:
-                # Same inter-peak interval but this peak is higher — replace previous
-                filtered[-1] = int(p)
-
-        if len(filtered) < 2:
+        rri_s = np.diff(peaks).astype(float) / fs
+        rri_s = rri_s[(rri_s > 0.3) & (rri_s < 2.0)]
+        if len(rri_s) < 3:
             return PPGFeatures(available=False)
 
-        rri_s   = np.diff(filtered).astype(float) / fs          # RR in seconds
-        bpm     = float(60.0 / rri_s.mean())
-
-        # Physiological sanity check
+        bpm = float(60.0 / np.median(rri_s))
         if not (30.0 < bpm < 200.0):
             return PPGFeatures(available=False)
 
-        # Reject intervals with extreme variability (motion artifact)
         cv = rri_s.std() / (rri_s.mean() + 1e-8)
         if cv > 0.40:
             return PPGFeatures(available=False)
 
         rmssd = float(np.sqrt(np.mean(np.diff(rri_s * 1000.0) ** 2)))  # ms
-
         return PPGFeatures(available=True, bpm=round(bpm, 1), rmssd=round(rmssd, 2))
-
     except Exception:
         return PPGFeatures(available=False)
 
@@ -273,25 +256,26 @@ class RuleBasedEmotionPredictor:
 
         # ── FOCUS ─────────────────────────────────────────────────────────
         # Evidence for: elevated beta (>10%), high beta/alpha, low theta/alpha
-        sc["focus"] += 0.35 * min(rb  / 0.12, 1.0)               # beta > 12 %
-        sc["focus"] += 0.25 * min(bar / 1.2,  1.0)               # beta/alpha > 1.2
+        sc["focus"] += 0.32 * min(rb  / 0.12, 1.0)               # beta > 12 %
+        sc["focus"] += 0.22 * min(bar / 1.2,  1.0)               # beta/alpha > 1.2
         sc["focus"] += 0.20 * max(0.0, 1.0 - thr / 2.5)          # theta/alpha < 2.5
-        sc["focus"] += 0.10 * min(rg  / 0.04, 1.0)               # some gamma
-        sc["focus"] += 0.10 * max(0.0, 1.0 - abs(faa) / 1.5)    # symmetric FAA
+        sc["focus"] += 0.12 * min(rg  / 0.04, 1.0)               # some gamma
+        sc["focus"] += 0.14 * max(0.0, 1.0 - abs(faa) / 1.2)    # symmetric FAA
 
         # ── STRESS ────────────────────────────────────────────────────────
         # Evidence for: elevated beta, alpha suppression, positive FAA
-        sc["stress"] += 0.30 * min(rb  / 0.12, 1.0)
-        sc["stress"] += 0.30 * min(max(faa,  0.0) / 0.8, 1.0)    # positive FAA → stress
-        sc["stress"] += 0.25 * max(0.0, 1.0 - ra / 0.12)         # alpha suppression
-        sc["stress"] += 0.15 * min(bar / 2.0,  1.0)              # high beta/alpha
+        sc["stress"] += 0.32 * min(rb  / 0.12, 1.0)
+        sc["stress"] += 0.28 * min(max(faa,  0.0) / 0.8, 1.0)    # positive FAA → stress
+        sc["stress"] += 0.28 * max(0.0, 1.0 - ra / 0.12)         # alpha suppression
+        sc["stress"] += 0.12 * min(bar / 2.0,  1.0)              # high beta/alpha
 
         # ── RELAXED ───────────────────────────────────────────────────────
         # Evidence for: elevated alpha (>15%), low beta, negative FAA
-        sc["relaxed"] += 0.35 * min(ra  / 0.15, 1.0)             # alpha > 15 % (was 18%)
-        sc["relaxed"] += 0.30 * min(max(-faa, 0.0) / 0.8, 1.0)   # negative FAA → calm
-        sc["relaxed"] += 0.20 * max(0.0, 1.0 - thr / 2.0)        # low theta/alpha
-        sc["relaxed"] += 0.15 * max(0.0, 1.0 - rb  / 0.12)       # low beta
+        sc["relaxed"] += 0.36 * min(ra  / 0.16, 1.0)             # alpha > 16 %
+        sc["relaxed"] += 0.28 * min(max(-faa, 0.0) / 0.8, 1.0)   # negative FAA → calm
+        sc["relaxed"] += 0.18 * max(0.0, 1.0 - thr / 2.0)        # low theta/alpha
+        sc["relaxed"] += 0.10 * max(0.0, 1.0 - rb  / 0.12)       # low beta
+        sc["relaxed"] += 0.08 * max(0.0, 1.0 - rt  / 0.30)       # low theta
 
         # ── TIRED ─────────────────────────────────────────────────────────
         # Tired = high theta/alpha AND genuinely LOW beta.
@@ -301,12 +285,12 @@ class RuleBasedEmotionPredictor:
         #   fatigue_gate → 0.0 when rb ≥ 10% (beta present → clearly awake/activated)
         fatigue_gate    = max(0.0, 1.0 - min(rb / 0.10, 1.0))
         # alpha_supp_gate: suppresses tired when alpha is reasonably present (relaxed state)
-        # At ra=14% gate=0 (no tired); at ra=7% gate=0.5; at ra=0 gate=1.0
-        alpha_supp_gate = max(0.0, 1.0 - min(ra / 0.14, 1.0))
+        # At ra=16% gate=0 (no tired); at ra=8% gate=0.5; at ra=0 gate=1.0
+        alpha_supp_gate = max(0.0, 1.0 - min(ra / 0.16, 1.0))
         tired_gate      = fatigue_gate * alpha_supp_gate           # BOTH conditions required
         sc["tired"] += 0.45 * min(thr / 3.0, 1.0) * tired_gate   # thr > 3 AND low beta AND low alpha
-        sc["tired"] += 0.35 * min(rt  / 0.32, 1.0) * tired_gate  # high theta AND low beta AND low alpha
-        sc["tired"] += 0.20 * max(0.0, 1.0 - ra  / 0.08)         # extreme alpha suppression (<8% only)
+        sc["tired"] += 0.35 * min(rt  / 0.35, 1.0) * tired_gate  # high theta AND low beta AND low alpha
+        sc["tired"] += 0.20 * max(0.0, 1.0 - ra  / 0.10)         # extreme alpha suppression (<10% only)
 
         # ── PPG / cardiovascular adjustments ──────────────────────────────
         # HR is a STRONG physiological signal — weight it heavily.
@@ -363,6 +347,15 @@ class RuleBasedEmotionPredictor:
             elif rmssd < 25:
                 sc["stress"]  += 0.10
                 sc["relaxed"] -= 0.05
+
+            # Combined HR + HRV cues
+            if rmssd < 20 and bpm > 85:
+                sc["stress"]  += 0.15
+                sc["relaxed"] -= 0.08
+                sc["tired"]   -= 0.08
+            elif rmssd > 50 and bpm < 75:
+                sc["relaxed"] += 0.10
+                sc["stress"]  -= 0.05
 
         # Clamp all scores to [0, 1]
         for k in sc:
@@ -421,3 +414,7 @@ class RuleBasedEmotionPredictor:
     def reset(self) -> None:
         """Clear prediction history (call on new session / reconnect)."""
         self._history.clear()
+
+    def get_history(self) -> list[str]:
+        """Return a copy of the recent emotion history used for smoothing."""
+        return list(self._history)

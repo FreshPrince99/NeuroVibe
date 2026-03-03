@@ -34,6 +34,8 @@ export default function EmotionPage() {
   const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
   const [ppgDataBuffer, setPpgDataBuffer] = useState<number[]>([]);  // for local PPG waveform
   const [likeDislikeData, setLikeDislikeData] = useState<{ label: string; probability: number; confidence: number } | null>(null);
+  const [ppgAvailable, setPpgAvailable] = useState<boolean | null>(null);
+  const ppgAvailableRef = useRef<boolean | null>(null);
 
   const clientRef = useRef<MuseClient | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -160,6 +162,8 @@ export default function EmotionPage() {
       }
       
       clientRef.current = new MuseClient();
+      // Enable PPG on Muse 2 / Muse S BEFORE connect
+      clientRef.current.enablePpg = true;
       await clientRef.current.connect();
       await clientRef.current.start();
       
@@ -232,24 +236,56 @@ export default function EmotionPage() {
       // Subscribe to PPG data (Muse 2 only — photoplethysmography for heart rate)
       // ppgReadings emits packets of ~6 samples at ~64 Hz per channel
       if (clientRef.current.ppgReadings) {
-        clientRef.current.ppgReadings.subscribe(reading => {
-          reading.samples.forEach((value: number) => {
-            if (value === null || isNaN(value)) return;
-            // Forward to backend for emotion scoring
-            if (socketRef.current?.connected) {
-              socketRef.current!.emit('ppg_sample', {
-                value,
-                timestamp: reading.timestamp,
-              });
-            }
-            // Store locally for PPG waveform visualization (last 512 samples)
-            setPpgDataBuffer(prev => {
-              const updated = [...prev, value];
-              return updated.length > 512 ? updated.slice(-512) : updated;
-            });
+        setPpgAvailable(null);
+        ppgAvailableRef.current = null;
+        const pushPpgValue = (value: number, timestamp: number) => {
+          if (value === null || isNaN(value)) return;
+          if (ppgAvailableRef.current !== true) {
+            ppgAvailableRef.current = true;
+            setPpgAvailable(true);
+          }
+          if (socketRef.current?.connected) {
+            socketRef.current!.emit('ppg_sample', { value, timestamp });
+          }
+          setPpgDataBuffer(prev => {
+            const updated = [...prev, value];
+            return updated.length > 512 ? updated.slice(-512) : updated;
           });
+        };
+
+        // If no PPG arrives within 12 s, mark unavailable
+        const ppgTimeout = setTimeout(() => {
+          if (ppgAvailableRef.current === null) {
+            ppgAvailableRef.current = false;
+            setPpgAvailable(false);
+          }
+        }, 12_000);
+
+        let logged = false;
+        clientRef.current.ppgReadings.subscribe(reading => {
+          const samples = (reading as any).samples ?? (reading as any).data ?? [];
+          const channel = (reading as any).ppgChannel;
+          // Prefer a single channel for consistency (Muse 2: 2=red, 1=infrared, 0=ambient)
+          if (typeof channel === 'number' && channel !== 2) return;
+          if (Array.isArray(samples) && samples.length > 0) {
+            if (Array.isArray(samples[0])) {
+              // samples = [channel][values] — use first channel for stability
+              (samples[0] as number[]).forEach(v => pushPpgValue(v, reading.timestamp));
+            } else {
+              (samples as number[]).forEach(v => pushPpgValue(v, reading.timestamp));
+            }
+            if (!logged) {
+              console.log('✓ PPG data received');
+              logged = true;
+            }
+            if (ppgTimeout) clearTimeout(ppgTimeout);
+          }
         });
         console.log('✓ PPG subscription active (Muse 2 heart rate)');
+      } else {
+        setPpgAvailable(false);
+        ppgAvailableRef.current = false;
+        console.log('⚠️  PPG not available on this device');
       }
     } catch (error: any) {
       console.error('Failed to reconnect Muse:', error);
@@ -380,6 +416,7 @@ export default function EmotionPage() {
         onConnect={handleConnectMuse}
         eegData={eegDataBuffer}
         ppgData={ppgDataBuffer}
+        ppgAvailable={ppgAvailable}
         onExitToHome={handleExitToHome}
         onBackToHome={handleBackToHome}
         playerRef={playerRef}

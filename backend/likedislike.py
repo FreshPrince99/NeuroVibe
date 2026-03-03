@@ -56,6 +56,8 @@ WIN_MODEL = 512                  # samples @ 128 Hz  = 4 s
 WIN_MUSE  = 1024                 # samples @ 256 Hz  = 4 s
 N_EEG     = 4                    # TP9, AF7, AF8, TP10
 N_FEAT    = 105
+MIN_CAL_WINDOWS_FOR_ISO = 10
+MIN_CAL_WINDOWS_FOR_ZSCORE = 5
 
 BANDS = {
     "delta": (1,  4),
@@ -401,9 +403,17 @@ class LikeDislikePredictor:
         baseline_128 = np.array([downsample_eeg(w) for w in baseline_windows])  # (N, 4, 512)
         baseline_mean = baseline_128.mean(axis=0)          # (4, 512)
 
-        # ── 2. Compute Z-score params from baseline ───────────────────────
-        zscore_mu  = baseline_128.mean(axis=(0, 2), keepdims=True)   # (1, 4, 1)
-        zscore_sig = baseline_128.std( axis=(0, 2), keepdims=True)   # (1, 4, 1)
+        # ── 2. Compute Z-score params from calibration windows when possible ──
+        # The training pipeline used baseline correction + per-participant Z-score
+        # over real task windows. Using baseline-only can collapse variance.
+        cal_128 = np.array([downsample_eeg(w) for w in calibration_windows]) if calibration_windows else None
+        if cal_128 is not None and len(cal_128) >= MIN_CAL_WINDOWS_FOR_ZSCORE:
+            zscore_src = cal_128 - baseline_mean
+        else:
+            zscore_src = baseline_128 - baseline_mean
+
+        zscore_mu  = zscore_src.mean(axis=(0, 2), keepdims=True)   # (1, 4, 1)
+        zscore_sig = zscore_src.std( axis=(0, 2), keepdims=True)   # (1, 4, 1)
         # Reshape for broadcasting: (4, 1, 1)
         zscore_mu  = zscore_mu.squeeze(0).reshape(N_EEG, 1, 1).astype(np.float32)
         zscore_sig = zscore_sig.squeeze(0).reshape(N_EEG, 1, 1).astype(np.float32)
@@ -421,10 +431,13 @@ class LikeDislikePredictor:
             feats_sc = self._scaler.transform(feats)
             labels_arr = np.array(labels, dtype=np.int32)
 
-            # ── 4. Fit isotonic recalibrator ──────────────────────────────────
-            probs = self._model.predict_proba(feats_sc)[:, 1]
-            iso   = IsotonicRegression(out_of_bounds="clip")
-            iso.fit(probs, labels_arr)
+            # ── 4. Fit isotonic recalibrator (only if enough data + both classes) ──
+            if len(feats_sc) >= MIN_CAL_WINDOWS_FOR_ISO and len(np.unique(labels_arr)) >= 2:
+                probs = self._model.predict_proba(feats_sc)[:, 1]
+                iso   = IsotonicRegression(out_of_bounds="clip")
+                iso.fit(probs, labels_arr)
+            else:
+                iso = None
         else:
             print("⚠️  No base model available — saving baseline/Z-score stats only (no isotonic calibration).")
 

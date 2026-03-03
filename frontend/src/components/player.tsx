@@ -31,6 +31,11 @@ type SpotifyTrack = {
   artists: SpotifyArtist[];
   album: { name: string; images: SpotifyImage[] };
 };
+type SpotifyAudioFeatures = {
+  id: string;
+  energy?: number;
+  valence?: number;
+};
 
 type SpotifyPlayerState = {
   paused: boolean;
@@ -147,6 +152,40 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     return `calm slow relaxing deep focus ${genresText}`;
   }, [focusEnergy, mode, preferredGenres]);
 
+  const fetchAudioFeatures = useCallback(async (ids: string[]): Promise<Record<string, SpotifyAudioFeatures>> => {
+    const token = accessTokenRef.current;
+    if (!token || ids.length === 0) return {};
+    const res = await fetch(
+      `https://api.spotify.com/v1/audio-features?ids=${ids.join(",")}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    const feats: SpotifyAudioFeatures[] = data?.audio_features ?? [];
+    const map: Record<string, SpotifyAudioFeatures> = {};
+    feats.forEach(f => {
+      if (f?.id) map[f.id] = f;
+    });
+    return map;
+  }, []);
+
+  const scoreTrack = useCallback((dominantEmotion: string, feature?: SpotifyAudioFeatures) => {
+    if (!feature) return 0;
+    const energy = feature.energy ?? 0.5;
+    const valence = feature.valence ?? 0.5;
+    const normalizedEmotion = dominantEmotion.toLowerCase();
+
+    let targetEnergy = focusEnergy === "energetic" ? 0.75 : 0.35;
+    if (mode === "relaxation") targetEnergy = 0.25;
+    if (stressEmotions.has(normalizedEmotion)) targetEnergy = 0.20;
+
+    const energyScore = 1 - Math.abs(energy - targetEnergy);
+    const valenceScore = stressEmotions.has(normalizedEmotion) || mode === "relaxation"
+      ? valence
+      : valence * 0.3;
+    return energyScore + 0.3 * valenceScore;
+  }, [focusEnergy, mode]);
+
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
     const token = accessTokenRef.current;
     const device = deviceIdRef.current;
@@ -175,7 +214,19 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
     if (tracks.length === 0) return false;
 
-    const chosenTrack = tracks[Math.floor(Math.random() * tracks.length)];
+    const ids = tracks
+      .map(t => t.uri?.split(":").pop())
+      .filter((id): id is string => Boolean(id))
+      .slice(0, 50);
+
+    const featuresMap = await fetchAudioFeatures(ids);
+    const scored = tracks.map(t => {
+      const id = t.uri?.split(":").pop() ?? "";
+      const score = scoreTrack(dominantEmotion, featuresMap[id]);
+      return { track: t, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const chosenTrack = scored[0]?.track ?? tracks[Math.floor(Math.random() * tracks.length)];
 
     const playResponse = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
       method: "PUT",

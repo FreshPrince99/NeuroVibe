@@ -261,6 +261,8 @@ export default function CalibrationStep({ onComplete }: Props) {
     setStatusMsg('Connecting to Muse headset…');
     try {
       museRef.current = new MuseClient();
+      // Enable PPG on Muse 2 / Muse S BEFORE connect
+      museRef.current.enablePpg = true;
       await museRef.current.connect();
       await museRef.current.start();
       setIsMuse(true);

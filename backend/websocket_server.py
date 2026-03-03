@@ -77,7 +77,7 @@ SAMPLE_RATE = 256
 is_processing = False  # Flag to prevent multiple simultaneous predictions
 ld_is_processing = False
 ld_last_emit_time: float = 0.0  # epoch time of last likedislike_prediction emit
-LD_EMIT_INTERVAL = 60.0         # seconds between badge updates
+LD_EMIT_INTERVAL = 4.0          # seconds between badge updates (~every 4s)
 
 # Emotion log: list of (wall_clock_time, emotion_string) recorded each prediction
 emotion_log: list = []
@@ -365,7 +365,19 @@ def _run_ld_prediction(window_samples: list) -> None:
                 dtype=np.float32,
             )
             result = ld_predictor.predict(win)
-            # Throttle: only emit to frontend once per minute
+            label      = result.get('label', '?')
+            prob       = result.get('probability', 0.5)
+            raw_prob   = result.get('raw_probability', prob)
+            confidence = result.get('confidence', 0.0)
+            threshold  = result.get('threshold', 0.5)
+            calibrated = result.get('calibrated', False)
+            n_cal      = result.get('n_cal_windows', 0)
+            bar = '█' * max(1, int(confidence * 20))
+            side = '👍 LIKE   ' if label == 'like' else '👎 DISLIKE'
+            print(f"  {side}  raw={raw_prob:.3f}→iso={prob:.3f}  "
+                  f"conf={confidence:.2f} {bar}  thresh={threshold:.2f}  "
+                  f"{'✓ personalised' if calibrated else '⚠ generic'}  n_cal={n_cal}")
+            # Emit to frontend on every window (throttled by LD_EMIT_INTERVAL)
             now = time.time()
             if now - ld_last_emit_time >= LD_EMIT_INTERVAL:
                 socketio.emit("likedislike_prediction", result)
@@ -446,12 +458,21 @@ def calibration_build():
             return jsonify({'error': 'Empty request body'}), 400
 
         def _to_array(window_list):
-            """Convert a list of dicts to (4, N) np.ndarray."""
+            """Convert a list of dicts to (4, N) np.ndarray.  None / NaN / Inf → 0.0"""
+            def _f(v):
+                """Coerce a single sample value to a clean float."""
+                if v is None:
+                    return 0.0
+                try:
+                    fv = float(v)
+                    return fv if np.isfinite(fv) else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
             return np.array([
-                [s['tp9']  for s in window_list],
-                [s['af7']  for s in window_list],
-                [s['af8']  for s in window_list],
-                [s['tp10'] for s in window_list],
+                [_f(s.get('tp9'))  for s in window_list],
+                [_f(s.get('af7'))  for s in window_list],
+                [_f(s.get('af8'))  for s in window_list],
+                [_f(s.get('tp10')) for s in window_list],
             ], dtype=np.float32)
 
         baseline_windows    = [_to_array(w) for w in body['baseline_samples']]
@@ -463,6 +484,13 @@ def calibration_build():
         if len(calibration_windows) == 0:
             return jsonify({'error': 'No calibration windows provided'}), 400
 
+        # NOTE: removed hard rejection when all labels are the same class.
+        # Isotonic recalibration needs both classes, but baseline + Z-score
+        # personalisation still saves and still substantially helps prediction.
+        if len(set(labels)) < 2:
+            print(f"⚠️  All labels are the same class ({set(labels)}). "
+                  f"Isotonic recalibration will be skipped, but baseline + Z-score will still save.")
+
         print(f"🧠 Building user profile: "
               f"{len(baseline_windows)} baseline windows, "
               f"{len(calibration_windows)} cal windows, "
@@ -471,10 +499,14 @@ def calibration_build():
         user_data = ld_predictor.build_user_profile(
             baseline_windows, calibration_windows, labels
         )
-        print("✓ User profile built and saved.")
+        print(f"✓ User profile built and saved. "
+              f"has_iso={user_data['has_iso']}, "
+              f"n_cal={user_data['n_cal_windows']}, "
+              f"label_counts={user_data.get('label_counts')}")
         return jsonify({
-            'success':         True,
-            'n_cal_windows':   user_data['n_cal_windows'],
+            'success':          True,
+            'n_cal_windows':    user_data['n_cal_windows'],
+            'has_iso':          user_data['has_iso'],
             'has_user_profile': True,
         })
 

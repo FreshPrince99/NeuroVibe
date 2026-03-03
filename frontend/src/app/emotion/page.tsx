@@ -43,6 +43,8 @@ export default function EmotionPage() {
   const testModeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSampleTimeRef = useRef<number>(0);   // epoch ms of last received EEG sample
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Stored after first BLE connect — lets auto-reconnect bypass the browser device picker
+  const deviceRef = useRef<BluetoothDevice | null>(null);
 
   // Initialize WebSocket connection (skip in test mode — backend is not needed)
   useEffect(() => {
@@ -98,6 +100,24 @@ export default function EmotionPage() {
     };
   }, [router]);
 
+  // Reconnect when the tab comes back to the foreground.
+  // Chrome suspends BLE in backgrounded tabs — without this the headset appears
+  // disconnected every time the user switches away and returns.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (sessionStorage.getItem('neurovibe_test_mode') === 'true') return;
+      // If EEG has been silent for >5 s and we have a saved device, reconnect silently.
+      const elapsed = Date.now() - lastSampleTimeRef.current;
+      if (elapsed > 5_000 && lastSampleTimeRef.current > 0 && deviceRef.current) {
+        console.log(`[Visibility] tab visible, EEG silent ${Math.round(elapsed/1000)}s — auto-reconnecting`);
+        void handleConnectMuse(deviceRef.current);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []); // refs-only inside — no stale closure risk
+
   // Prompt user to connect Muse (always show on page load)
   useEffect(() => {
     // If test mode is active, don't show the connect prompt — handled below
@@ -147,9 +167,16 @@ export default function EmotionPage() {
     };
   }, []);
 
-  const handleConnectMuse = async () => {
+  const handleConnectMuse = async (reconnectDevice?: BluetoothDevice) => {
+    // Guard: if called from a React button onClick it receives a MouseEvent — ignore it.
+    // Only treat the argument as a BluetoothDevice if it genuinely has a .gatt property.
+    const device: BluetoothDevice | undefined =
+      reconnectDevice && (reconnectDevice as any).gatt !== undefined
+        ? reconnectDevice
+        : undefined;
+
     setIsConnecting(true);
-    setConnectionStatus('Connecting to Muse...');
+    setConnectionStatus(device ? 'Auto-reconnecting to Muse…' : 'Connecting to Muse...');
     
     try {
       // Clear any existing connection
@@ -161,11 +188,25 @@ export default function EmotionPage() {
         }
       }
       
-      clientRef.current = new MuseClient();
+      const client = new MuseClient();
       // Enable PPG on Muse 2 / Muse S BEFORE connect
-      clientRef.current.enablePpg = true;
-      await clientRef.current.connect();
-      await clientRef.current.start();
+      client.enablePpg = true;
+      clientRef.current = client;
+
+      if (device) {
+        // Reuse the already-paired device — device.gatt.connect() does NOT need a
+        // user gesture, so this works silently from watchdog/error callbacks.
+        const freshGatt = await device.gatt!.connect();
+        await client.connect(freshGatt);
+      } else {
+        await client.connect(); // opens browser Bluetooth picker (needs user gesture)
+      }
+
+      // Save device reference so all future auto-reconnects bypass the picker.
+      const dev = ((client as any).gatt)?.device as BluetoothDevice | undefined;
+      if (dev) deviceRef.current = dev;
+
+      await client.start();
       
       setIsConnected(true);
       setNeedsConnect(false);
@@ -212,9 +253,17 @@ export default function EmotionPage() {
         },
         error: (err) => {
           console.error('EEG subscription error:', err);
-          setConnectionStatus('EEG stream error — try reconnecting');
+          setConnectionStatus('⚠️ EEG disconnected — auto-reconnecting in 3s…');
           setIsConnected(false);
-          setNeedsConnect(true);
+          // Pass the saved device so reconnect skips the Bluetooth picker entirely.
+          setTimeout(() => { void handleConnectMuse(deviceRef.current ?? undefined); }, 3000);
+        },
+        complete: () => {
+          // BLE disconnected gracefully — treat as a silent drop and auto-reconnect.
+          console.warn('[EEG] stream completed (BLE dropped) — auto-reconnecting in 3s…');
+          setConnectionStatus('⚠️ EEG stream ended — auto-reconnecting in 3s…');
+          setIsConnected(false);
+          setTimeout(() => { void handleConnectMuse(deviceRef.current ?? undefined); }, 3000);
         },
       });
 
@@ -223,15 +272,15 @@ export default function EmotionPage() {
       if (watchdogRef.current) clearInterval(watchdogRef.current);
       watchdogRef.current = setInterval(() => {
         const elapsed = Date.now() - lastSampleTimeRef.current;
-        if (elapsed > 15_000 && lastSampleTimeRef.current > 0) {
-          console.warn(`⚠️  No EEG samples for ${Math.round(elapsed / 1000)}s`);
-          setConnectionStatus('⚠️ EEG signal lost — disconnect and reconnect the headset');
-          setIsConnected(false);
-          setNeedsConnect(true);
+        if (elapsed > 10_000 && lastSampleTimeRef.current > 0) {
+          console.warn(`⚠️  No EEG samples for ${Math.round(elapsed / 1000)}s — auto-reconnecting`);
           clearInterval(watchdogRef.current!);
           watchdogRef.current = null;
+          setConnectionStatus('⚠️ EEG signal lost — auto-reconnecting…');
+          setIsConnected(false);
+          setTimeout(() => { void handleConnectMuse(deviceRef.current ?? undefined); }, 1500);
         }
-      }, 10_000);
+      }, 5_000);
 
       // Subscribe to PPG data (Muse 2 only — photoplethysmography for heart rate)
       // ppgReadings emits packets of ~6 samples at ~64 Hz per channel
@@ -399,7 +448,7 @@ export default function EmotionPage() {
           <span className="text-lg">{likeDislikeData.label === 'like' ? '👍' : '👎'}</span>
           <div>
             <p className="font-medium capitalize">{likeDislikeData.label}ing this</p>
-            <p className="text-xs opacity-70">{Math.round(likeDislikeData.probability * 100)}% confidence</p>
+            <p className="text-xs opacity-70">{Math.round(likeDislikeData.confidence * 100)}% confident</p>
           </div>
         </div>
       )}
@@ -413,7 +462,7 @@ export default function EmotionPage() {
         isPaused={isPaused}
         needsConnect={needsConnect}
         isConnecting={isConnecting}
-        onConnect={handleConnectMuse}
+        onConnect={() => { void handleConnectMuse(); }}
         eegData={eegDataBuffer}
         ppgData={ppgDataBuffer}
         ppgAvailable={ppgAvailable}

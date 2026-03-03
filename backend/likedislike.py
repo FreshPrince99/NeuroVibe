@@ -256,7 +256,14 @@ class LikeDislikePredictor:
         if os.path.exists(USER_PKL):
             try:
                 with open(USER_PKL, "rb") as fh:
-                    return pickle.load(fh)
+                    user = pickle.load(fh)
+                # Backfill fields for older profiles
+                if isinstance(user, dict):
+                    if "has_iso" not in user:
+                        user["has_iso"] = bool(user.get("iso_calibrator"))
+                    if "n_cal_windows" not in user:
+                        user["n_cal_windows"] = 0
+                return user
             except Exception as e:
                 print(f"⚠️  Could not load user.pkl: {e}")
         return None
@@ -332,6 +339,9 @@ class LikeDislikePredictor:
                 baseline = gb.reshape(N_EEG, 1)               # (4,) → (4,1) broadcastable
             elif gb.shape == win.shape:
                 baseline = gb                                   # (4, 512) — exact match
+            elif gb.shape == (N_EEG, WIN_MUSE):
+                # global_baseline.npy was saved at 256 Hz — downsample on the fly
+                baseline = downsample_eeg(gb)                  # → (4, 512)
             else:
                 baseline = np.zeros_like(win)                  # unexpected shape → skip
         else:
@@ -341,30 +351,37 @@ class LikeDislikePredictor:
         # Per-user Z-score normalisation
         # zscore_mu/sig stored as (4, 1, 1) — reshape to (4, 1) for (4, 512) broadcasting
         if self._user and "zscore_mu" in self._user:
-            mu  = np.asarray(self._user["zscore_mu"]).reshape(N_EEG, 1)
-            sig = np.asarray(self._user["zscore_sig"]).reshape(N_EEG, 1)
-            win_corr = (win_corr - mu) / (sig + 1e-8)
+            # stored as (4,1,1) — reshape to (4,1) for (4,512) broadcasting
+            mu  = np.asarray(self._user["zscore_mu"]).reshape(N_EEG, 1).astype(np.float32)
+            sig = np.asarray(self._user["zscore_sig"]).reshape(N_EEG, 1).astype(np.float32)
+            win_corr = (win_corr - mu) / (np.maximum(sig, 1e-8))
 
         # Feature extraction
         feat    = extract_105(win_corr).reshape(1, -1)
         feat_sc = self._scaler.transform(feat)
 
         # Predict
-        prob = float(self._model.predict_proba(feat_sc)[0, 1])  # P(dislike)
+        raw_prob = float(self._model.predict_proba(feat_sc)[0, 1])  # P(dislike)
+        prob     = raw_prob
 
-        # Isotonic recalibration
-        if self._user and "iso_calibrator" in self._user:
+        # Isotonic recalibration (only if calibrator was actually fitted and not collapsed)
+        if self._user and self._user.get("iso_calibrator") is not None:
             iso  = self._user["iso_calibrator"]
-            prob = float(iso.predict([prob])[0])
+            prob = float(iso.predict([raw_prob])[0])
 
         threshold  = 0.5 if not self._user else self._user.get("threshold", 0.5)
         label      = "dislike" if prob >= threshold else "like"
-        confidence = float(abs(prob - 0.5) * 2)
+        confidence = float(abs(prob - threshold) * 2)
 
         return {
-            "label":       label,
-            "probability": round(prob, 3),
-            "confidence":  round(confidence, 3),
+            "label":         label,
+            "probability":   round(prob, 3),
+            "raw_probability": round(raw_prob, 3),
+            "confidence":    round(confidence, 3),
+            "threshold":     round(threshold, 3),
+            "calibrated":    bool(self._user and (self._user.get("has_iso") or
+                                                   self._user.get("threshold", 0.5) != 0.5)),
+            "n_cal_windows": int(self._user.get("n_cal_windows", 0)) if self._user else 0,
         }
 
     # ── profile building (called after calibration) ───────────────────────
@@ -401,54 +418,113 @@ class LikeDislikePredictor:
 
         # ── 1. Compute user baseline ──────────────────────────────────────
         baseline_128 = np.array([downsample_eeg(w) for w in baseline_windows])  # (N, 4, 512)
+        nan_count = int(np.isnan(baseline_128).sum())
+        if nan_count > 0:
+            print(f"  [WARN] baseline_128 contains {nan_count} NaN values "
+                  f"(likely from lost-channel samples) → replacing with 0")
+            baseline_128 = np.nan_to_num(baseline_128, nan=0.0, posinf=0.0, neginf=0.0)
         baseline_mean = baseline_128.mean(axis=0)          # (4, 512)
 
-        # ── 2. Compute Z-score params from calibration windows when possible ──
-        # The training pipeline used baseline correction + per-participant Z-score
-        # over real task windows. Using baseline-only can collapse variance.
-        cal_128 = np.array([downsample_eeg(w) for w in calibration_windows]) if calibration_windows else None
-        if cal_128 is not None and len(cal_128) >= MIN_CAL_WINDOWS_FOR_ZSCORE:
-            zscore_src = cal_128 - baseline_mean
-        else:
-            zscore_src = baseline_128 - baseline_mean
+        # ── 2. Compute Z-score stats across ALL user windows (baseline + calibration)
+        # This exactly matches the training notebook which used axis=(0,2) across all
+        # participant windows. Using only calibration or only baseline gives noisy stats.
+        cal_128 = (
+            np.array([downsample_eeg(w) for w in calibration_windows], dtype=np.float32)
+            if calibration_windows
+            else np.empty((0, N_EEG, WIN_MODEL), dtype=np.float32)
+        )
+        if len(cal_128) > 0:
+            nan_cal = int(np.isnan(cal_128).sum())
+            if nan_cal > 0:
+                print(f"  [WARN] cal_128 contains {nan_cal} NaN values → replacing with 0")
+                cal_128 = np.nan_to_num(cal_128, nan=0.0, posinf=0.0, neginf=0.0)
 
-        zscore_mu  = zscore_src.mean(axis=(0, 2), keepdims=True)   # (1, 4, 1)
-        zscore_sig = zscore_src.std( axis=(0, 2), keepdims=True)   # (1, 4, 1)
+        # Baseline-correct both sets, then pool them for Z-score computation.
+        baseline_corr = (baseline_128 - baseline_mean).astype(np.float32)   # (N_base, 4, 512)
+        if len(cal_128) > 0:
+            cal_corr = (cal_128 - baseline_mean).astype(np.float32)          # (N_cal, 4, 512)
+            all_corr = np.concatenate([baseline_corr, cal_corr], axis=0)     # (N_total, 4, 512)
+        else:
+            all_corr = baseline_corr
+        zscore_source = "all_windows"
+
+        zscore_mu  = all_corr.mean(axis=(0, 2), keepdims=True)   # (1, 4, 1)
+        zscore_sig = all_corr.std( axis=(0, 2), keepdims=True)   # (1, 4, 1)
         # Reshape for broadcasting: (4, 1, 1)
         zscore_mu  = zscore_mu.squeeze(0).reshape(N_EEG, 1, 1).astype(np.float32)
         zscore_sig = zscore_sig.squeeze(0).reshape(N_EEG, 1, 1).astype(np.float32)
 
         # ── 3. Extract features from calibration windows ──────────────────
+        # z-score mu/sig have shape (4,1,1); we need (4,1) for 2-D windows.
+        _zmu  = zscore_mu[:, :, 0]   # (4, 1)
+        _zsig = zscore_sig[:, :, 0]  # (4, 1)
+
         iso = None
         if self._model is not None and self._scaler is not None:
             feats = []
             for win_256 in calibration_windows:
                 win = downsample_eeg(win_256) - baseline_mean
-                win = (win - zscore_mu[:, :, 0]) / (zscore_sig[:, :, 0] + 1e-8)
+                win = (win - _zmu) / (_zsig + 1e-8)
                 feats.append(extract_105(win))
 
             feats    = np.nan_to_num(np.array(feats, dtype=np.float32))
             feats_sc = self._scaler.transform(feats)
             labels_arr = np.array(labels, dtype=np.int32)
 
-            # ── 4. Fit isotonic recalibrator (only if enough data + both classes) ──
-            if len(feats_sc) >= MIN_CAL_WINDOWS_FOR_ISO and len(np.unique(labels_arr)) >= 2:
-                probs = self._model.predict_proba(feats_sc)[:, 1]
-                iso   = IsotonicRegression(out_of_bounds="clip")
-                iso.fit(probs, labels_arr)
-            else:
-                iso = None
-        else:
-            print("⚠️  No base model available — saving baseline/Z-score stats only (no isotonic calibration).")
+            # ── 4. Compute calibration-optimal threshold (robust for small n_cal) ──
+            # Sweep thresholds and pick the one that maximises balanced accuracy on
+            # the calibration set.  Works reliably even with 10–30 windows.
+            from sklearn.metrics import balanced_accuracy_score as _ba_score
+            label_counts = {int(k): int(v) for k, v in zip(*np.unique(labels_arr, return_counts=True))}
+            probs = (self._model.predict_proba(feats_sc)[:, 1]
+                     if (self._model is not None and self._scaler is not None)
+                     else np.full(len(feats_sc), 0.5, dtype=np.float32))
 
-        # ── 5. Persist ────────────────────────────────────────────────────
+            best_thresh = 0.5
+            best_ba     = 0.0
+            for _t in np.arange(0.10, 0.91, 0.05):
+                _preds = (probs >= _t).astype(int)
+                if len(np.unique(_preds)) < 2:
+                    continue
+                _ba = _ba_score(labels_arr, _preds)
+                if _ba > best_ba:
+                    best_ba, best_thresh = _ba, float(_t)
+            print(f"  Optimal threshold: {best_thresh:.2f}  (cal BA={best_ba:.1%}  "
+                  f"prob range=[{probs.min():.3f}, {probs.max():.3f}])")
+
+            # ── 5. Fit isotonic recalibrator (only if enough data + both classes) ──
+            # Skip if the isotonic collapses to ≤ 2 unique output values — that means
+            # the raw probabilities have too little variance to recalibrate usefully.
+            iso = None
+            if len(feats_sc) >= MIN_CAL_WINDOWS_FOR_ISO and len(np.unique(labels_arr)) >= 2:
+                _iso_cand = IsotonicRegression(out_of_bounds="clip")
+                _iso_cand.fit(probs, labels_arr)
+                # Evaluate on a grid to detect collapse
+                _iso_test  = _iso_cand.predict(np.linspace(0.0, 1.0, 51))
+                _n_unique  = len(np.unique(_iso_test))
+                _iso_range = _iso_test.max() - _iso_test.min()
+                if _n_unique >= 3 and _iso_range >= 0.05:
+                    iso = _iso_cand
+                    print(f"  Isotonic OK: {_n_unique} unique outputs, range={_iso_range:.3f}")
+                else:
+                    print(f"  [WARN] Isotonic collapsed ({_n_unique} unique values, "
+                          f"range={_iso_range:.3f}) — using threshold-only personalisation")
+        else:
+            print("  No base model available — saving baseline/Z-score stats only.")
+            label_counts = {}
+            best_thresh  = 0.5
+
+        # ── 6. Persist ────────────────────────────────────────────────────
         user_data: dict = {
             "baseline":        baseline_mean,
             "zscore_mu":       zscore_mu,
             "zscore_sig":      zscore_sig,
             "iso_calibrator":  iso,
-            "threshold":       0.5,
+            "threshold":       best_thresh,
             "n_cal_windows":   len(calibration_windows),
+            "zscore_source":   zscore_source,
+            "has_iso":         bool(iso),
+            "label_counts":    label_counts,
         }
         self._save_user_pkl(user_data)
         return user_data

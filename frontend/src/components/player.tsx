@@ -35,6 +35,11 @@ type SpotifyAudioFeatures = {
   id: string;
   energy?: number;
   valence?: number;
+  danceability?: number;
+};
+type SpotifyTrackMeta = {
+  id: string;
+  popularity?: number;
 };
 
 type SpotifyPlayerState = {
@@ -152,27 +157,51 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     return `calm slow relaxing deep focus ${genresText}`;
   }, [focusEnergy, mode, preferredGenres]);
 
-  const fetchAudioFeatures = useCallback(async (ids: string[]): Promise<Record<string, SpotifyAudioFeatures>> => {
+  const fetchAudioFeatures = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return { features: {}, meta: {} };
+
+    // Prefer server-side client-credentials (avoids 403 from Web API on some accounts)
+    try {
+      const res = await fetch("/api/spotify/audio-features", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const feats: SpotifyAudioFeatures[] = data?.audio_features ?? [];
+        const tracks: SpotifyTrackMeta[] = data?.tracks ?? [];
+        const fMap: Record<string, SpotifyAudioFeatures> = {};
+        const tMap: Record<string, SpotifyTrackMeta> = {};
+        feats.forEach(f => { if (f?.id) fMap[f.id] = f; });
+        tracks.forEach(t => { if (t?.id) tMap[t.id] = t; });
+        return { features: fMap, meta: tMap };
+      }
+    } catch {
+      // fall through to client token
+    }
+
     const token = accessTokenRef.current;
-    if (!token || ids.length === 0) return {};
+    if (!token) return { features: {}, meta: {} };
     const res = await fetch(
       `https://api.spotify.com/v1/audio-features?ids=${ids.join(",")}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!res.ok) return {};
+    if (!res.ok) return { features: {}, meta: {} };
     const data = await res.json();
     const feats: SpotifyAudioFeatures[] = data?.audio_features ?? [];
-    const map: Record<string, SpotifyAudioFeatures> = {};
-    feats.forEach(f => {
-      if (f?.id) map[f.id] = f;
-    });
-    return map;
+    const fMap: Record<string, SpotifyAudioFeatures> = {};
+    feats.forEach(f => { if (f?.id) fMap[f.id] = f; });
+    return { features: fMap, meta: {} };
   }, []);
 
-  const scoreTrack = useCallback((dominantEmotion: string, feature?: SpotifyAudioFeatures) => {
+  const scoreTrack = useCallback(
+    (dominantEmotion: string, feature?: SpotifyAudioFeatures, meta?: SpotifyTrackMeta) => {
     if (!feature) return 0;
     const energy = feature.energy ?? 0.5;
     const valence = feature.valence ?? 0.5;
+    const danceability = feature.danceability ?? 0.5;
+    const popularity = meta?.popularity ?? 50;
     const normalizedEmotion = dominantEmotion.toLowerCase();
 
     let targetEnergy = focusEnergy === "energetic" ? 0.75 : 0.35;
@@ -183,7 +212,9 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     const valenceScore = stressEmotions.has(normalizedEmotion) || mode === "relaxation"
       ? valence
       : valence * 0.3;
-    return energyScore + 0.3 * valenceScore;
+    const danceScore = mode === "relaxation" ? (1 - danceability) : danceability;
+    const popScore = Math.min(Math.max(popularity / 100, 0), 1);
+    return energyScore + 0.3 * valenceScore + 0.15 * danceScore + 0.05 * popScore;
   }, [focusEnergy, mode]);
 
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
@@ -219,10 +250,10 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
       .filter((id): id is string => Boolean(id))
       .slice(0, 50);
 
-    const featuresMap = await fetchAudioFeatures(ids);
+    const { features: featuresMap, meta: metaMap } = await fetchAudioFeatures(ids);
     const scored = tracks.map(t => {
       const id = t.uri?.split(":").pop() ?? "";
-      const score = scoreTrack(dominantEmotion, featuresMap[id]);
+      const score = scoreTrack(dominantEmotion, featuresMap[id], metaMap[id]);
       return { track: t, score };
     });
     scored.sort((a, b) => b.score - a.score);
@@ -251,10 +282,22 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   const queueNextTrackFromSummary = useCallback(async (trackUri: string) => {
     if (!trackUri || endHandledForTrackRef.current === trackUri) return;
 
+    // Mark as handled IMMEDIATELY to prevent duplicate calls from timer + SDK event.
+    // Without this, a failed search would leave the ref unset, causing infinite retries
+    // of the same failing query — making the song appear stuck/repeating.
+    endHandledForTrackRef.current = trackUri;
+
     const dominantEmotion = getDominantEmotion();
     const started = await playTrackForEmotionSummary(dominantEmotion);
-    if (started) {
-      endHandledForTrackRef.current = trackUri;
+    if (!started) {
+      console.warn("[Player] Failed to start next track — will retry on next emotion update.");
+      // Reset after a delay so a future emotion change can trigger a retry
+      // with a potentially different search query (different dominant emotion).
+      setTimeout(() => {
+        if (endHandledForTrackRef.current === trackUri) {
+          endHandledForTrackRef.current = "";
+        }
+      }, 15_000);
     }
   }, [getDominantEmotion, playTrackForEmotionSummary]);
 
@@ -367,10 +410,16 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         // here would prevent the next song from ever being queued.
         // The timer is self-guarded: if (activeTrackUriRef.current !== trackUri) return.
 
-        // Also detect end via position proximity (fires before the timer if lag is small)
-        const hasEnded = typedState.duration > 0 &&
+        // Detect end via position proximity — catches end slightly earlier than the timer.
+        // Also catches the Spotify SDK's "loop back to 0" behaviour: when a track ends
+        // naturally the SDK fires paused=true, position=0 — that is NOT a real pause,
+        // the track is over.
+        const atEnd = typedState.duration > 0 &&
           typedState.position >= typedState.duration - 1500;
-        if (hasEnded) {
+        const loopedToStart = typedState.paused &&
+          typedState.position === 0 &&
+          typedState.duration > 0;
+        if (atEnd || loopedToStart) {
           void queueNextTrackFromSummary(trackUri);
         }
       });
@@ -399,24 +448,40 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   }, [accessToken, queueNextTrackFromSummary]);
 
   // Trigger the very first track once the device is ready. Guarded by ref so
-  // changing emotion later never re-fires this.
+  // changing emotion later never re-fires this. If the initial play fails (e.g.
+  // Spotify not ready yet) the flag is reset so the next deviceId change retries.
   useEffect(() => {
     if (!deviceId || !accessToken || hasStartedPlaybackRef.current) return;
     hasStartedPlaybackRef.current = true;
-    void playTrackForEmotionSummary(emotionRef.current.toLowerCase());
+    void playTrackForEmotionSummary(emotionRef.current.toLowerCase()).then(success => {
+      if (!success) {
+        // Allow retry when the SDK fires deviceId again after reconnect.
+        hasStartedPlaybackRef.current = false;
+      }
+    });
   // emotion intentionally omitted — emotionRef.current is read at call time.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, deviceId, playTrackForEmotionSummary]);
 
   // Tick position forward every second while playing (SDK events are not 1-per-second).
+  // Also acts as a safety net: if the Spotify SDK state event never fires at track end,
+  // the ticker catches it and queues the next track.
   useEffect(() => {
     if (!isPlaying) return;
+    const durMs = currentTrack?.durationMs ?? 0;
     const id = setInterval(() => {
       positionMsRef.current += 1000;
       setPositionMs(positionMsRef.current);
+      // Safety fallback: detect end of track from local clock if SDK event is late.
+      if (durMs > 0 && positionMsRef.current >= durMs - 800 && activeTrackUriRef.current) {
+        void queueNextTrackFromSummary(activeTrackUriRef.current);
+      }
     }, 1000);
     return () => clearInterval(id);
-  }, [isPlaying]);
+  // currentTrack?.durationMs ensures the interval restarts with the correct duration
+  // when the track changes. queueNextTrackFromSummary is stable (useCallback).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, currentTrack?.durationMs, queueNextTrackFromSummary]);
 
   // Collect emotion samples while a track is playing; evaluated at song end.
   useEffect(() => {

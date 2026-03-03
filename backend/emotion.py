@@ -86,7 +86,7 @@ def _band_power(signal: np.ndarray, fs: int, low: float, high: float) -> float:
     nperseg = min(len(signal), fs * 2)          # at most 2-s window
     freqs, psd = welch(signal, fs=fs, nperseg=nperseg, average="mean")
     mask = (freqs >= low) & (freqs < high)
-    return float(np.trapz(psd[mask], freqs[mask]))
+    return float(np.trapezoid(psd[mask], freqs[mask]))
 
 
 def extract_eeg_features(channels_data: dict, fs: int = EEG_SAMPLE_RATE) -> dict:

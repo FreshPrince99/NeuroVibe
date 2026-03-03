@@ -235,8 +235,10 @@ export default function CalibrationStep({ onComplete }: Props) {
     songBufs.current = picked.map(() => []);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const museRef      = useRef<MuseClient | null>(null);
-  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const museRef       = useRef<MuseClient | null>(null);
+  // Saved after first BLE connect — lets every auto-reconnect bypass the browser device picker
+  const museDeviceRef = useRef<BluetoothDevice | null>(null);
+  const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const phaseRef     = useRef<Phase>('instructions');
   // Tracks last EEG sample arrival time (updated on every sample — used by dropout watchdog)
   const lastCalSampleRef  = useRef<number>(0);
@@ -255,6 +257,56 @@ export default function CalibrationStep({ onComplete }: Props) {
     };
   }, []);
 
+  // Reconnect when the tab comes back to the foreground (Chrome suspends BLE in background)
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      const p = phaseRef.current;
+      if (p !== 'baseline' && p !== 'song_playing') return;
+      const elapsed = Date.now() - lastCalSampleRef.current;
+      if (elapsed > 5_000 && lastCalSampleRef.current > 0 && museDeviceRef.current) {
+        console.log(`[CalibrationStep][Visibility] EEG silent ${Math.round(elapsed/1000)}s — reconnecting`);
+        const savedDev = museDeviceRef.current;
+        void (async () => {
+          try {
+            if (museRef.current) { try { museRef.current.disconnect(); } catch {} }
+            const nc = new MuseClient();
+            nc.enablePpg = true;
+            museRef.current = nc;
+            const fg = await savedDev.gatt!.connect();
+            await nc.connect(fg);
+            const nd = ((nc as any).gatt)?.device as BluetoothDevice | undefined;
+            if (nd) museDeviceRef.current = nd;
+            await nc.start();
+            lastCalSampleRef.current = Date.now();
+            setIsMuse(true);
+            setStatusMsg('✓ Muse reconnected (tab focus)');
+            zipSamples(nc.eegReadings).subscribe({
+              next: (reading) => {
+                lastCalSampleRef.current = Date.now();
+                const s = {
+                  tp9:  (Number.isFinite(reading.data[0] as number) ? reading.data[0] as number : 0),
+                  af7:  (Number.isFinite(reading.data[1] as number) ? reading.data[1] as number : 0),
+                  af8:  (Number.isFinite(reading.data[2] as number) ? reading.data[2] as number : 0),
+                  tp10: (Number.isFinite(reading.data[3] as number) ? reading.data[3] as number : 0),
+                };
+                const p2 = phaseRef.current;
+                if (p2 === 'baseline') baselineBuf.current.push(s);
+                else if (p2 === 'song_playing') songBufs.current[songIndexRef.current].push(s);
+              },
+              error: () => {},
+              complete: () => {},
+            });
+          } catch (e) {
+            console.error('[CalibrationStep][Visibility] Reconnect failed:', e);
+          }
+        })();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []); // refs-only inside — no stale closure risk
+
   // ── Muse connection ─────────────────────────────────────────────────────
   const connectMuse = useCallback(async () => {
     setPhase('connecting');
@@ -264,6 +316,9 @@ export default function CalibrationStep({ onComplete }: Props) {
       // Enable PPG on Muse 2 / Muse S BEFORE connect
       museRef.current.enablePpg = true;
       await museRef.current.connect();
+      // Save device reference so reconnects can skip the browser picker
+      const _dev = ((museRef.current as any).gatt)?.device as BluetoothDevice | undefined;
+      if (_dev) museDeviceRef.current = _dev;
       await museRef.current.start();
       setIsMuse(true);
       setStatusMsg('✓ Muse connected');
@@ -280,10 +335,10 @@ export default function CalibrationStep({ onComplete }: Props) {
         lastCalSampleRef.current = Date.now();
 
         const sample: EEGSample = {
-          tp9:  reading.data[0] ?? 0,
-          af7:  reading.data[1] ?? 0,
-          af8:  reading.data[2] ?? 0,
-          tp10: reading.data[3] ?? 0,
+          tp9:  (Number.isFinite(reading.data[0] as number) ? reading.data[0] as number : 0),
+          af7:  (Number.isFinite(reading.data[1] as number) ? reading.data[1] as number : 0),
+          af8:  (Number.isFinite(reading.data[2] as number) ? reading.data[2] as number : 0),
+          tp10: (Number.isFinite(reading.data[3] as number) ? reading.data[3] as number : 0),
         };
 
         const p = phaseRef.current;
@@ -296,18 +351,114 @@ export default function CalibrationStep({ onComplete }: Props) {
       },
       error: (err) => {
         console.error('[CalibrationStep] EEG stream error:', err);
-        // Only surface the error if we haven't already finished or errored
         const curPhase = phaseRef.current;
-        if (curPhase !== 'done' && curPhase !== 'saving' && curPhase !== 'error') {
-          setErrorMsg(
-            'EEG stream disconnected unexpectedly. ' +
-            'Please disconnect and reconnect your headset, then try again.'
-          );
-          setPhase('error');
-        }
+        if (curPhase === 'done' || curPhase === 'saving' || curPhase === 'error') return;
+
+        // Auto-reconnect: preserve all buffers, timers and phase — just re-establish BLE.
+        setStatusMsg('📡 EEG disconnected — reconnecting…');
+        void (async () => {
+          try {
+            if (museRef.current) { try { museRef.current.disconnect(); } catch { /* ignore */ } }
+            const newClient = new MuseClient();
+            newClient.enablePpg = true;
+            museRef.current = newClient;
+            // Reuse saved device to skip the Bluetooth picker (no user gesture needed)
+            const _savedDev = museDeviceRef.current;
+            if (_savedDev) {
+              const _freshGatt = await _savedDev.gatt!.connect();
+              await newClient.connect(_freshGatt);
+            } else {
+              await newClient.connect();
+            }
+            const _newDev = ((newClient as any).gatt)?.device as BluetoothDevice | undefined;
+            if (_newDev) museDeviceRef.current = _newDev;
+            await newClient.start();
+            lastCalSampleRef.current = Date.now();
+            setIsMuse(true);
+            setStatusMsg('✓ Muse reconnected');
+
+            // Re-subscribe with identical logic — buffers + phase are unchanged.
+            zipSamples(newClient.eegReadings).subscribe({
+              next: (reading) => {
+                lastCalSampleRef.current = Date.now();
+                const s = {
+                  tp9:  (Number.isFinite(reading.data[0] as number) ? reading.data[0] as number : 0),
+                  af7:  (Number.isFinite(reading.data[1] as number) ? reading.data[1] as number : 0),
+                  af8:  (Number.isFinite(reading.data[2] as number) ? reading.data[2] as number : 0),
+                  tp10: (Number.isFinite(reading.data[3] as number) ? reading.data[3] as number : 0),
+                };
+                const p = phaseRef.current;
+                if (p === 'baseline') baselineBuf.current.push(s);
+                else if (p === 'song_playing') songBufs.current[songIndexRef.current].push(s);
+              },
+              error: (err2) => {
+                console.error('[CalibrationStep] EEG error after reconnect:', err2);
+                if (phaseRef.current !== 'done' && phaseRef.current !== 'saving') {
+                  setErrorMsg('EEG disconnected twice. Please restart calibration.');
+                  setPhase('error');
+                }
+              },
+              complete: () => console.log('[CalibrationStep] EEG reconnect stream complete.'),
+            });
+          } catch (reconnErr: unknown) {
+            console.error('[CalibrationStep] Auto-reconnect failed:', reconnErr);
+            if (phaseRef.current !== 'done' && phaseRef.current !== 'saving') {
+              setErrorMsg(
+                'Could not reconnect headset. Please restart calibration and try again.'
+              );
+              setPhase('error');
+            }
+          }
+        })();
       },
       complete: () => {
-        console.log('[CalibrationStep] EEG stream completed.');
+        // BLE disconnected gracefully — treat as a silent drop so calibration continues.
+        console.warn('[CalibrationStep] EEG stream completed (BLE dropped) — reconnecting…');
+        const _p = phaseRef.current;
+        if (_p === 'done' || _p === 'saving' || _p === 'error') return;
+        setStatusMsg('📡 EEG stream ended — reconnecting…');
+        void (async () => {
+          try {
+            if (museRef.current) { try { museRef.current.disconnect(); } catch { /* ignore */ } }
+            const _nc = new MuseClient();
+            _nc.enablePpg = true;
+            museRef.current = _nc;
+            const _sd = museDeviceRef.current;
+            if (_sd) {
+              const _fg = await _sd.gatt!.connect();
+              await _nc.connect(_fg);
+            } else {
+              await _nc.connect();
+            }
+            const _nd = ((_nc as any).gatt)?.device as BluetoothDevice | undefined;
+            if (_nd) museDeviceRef.current = _nd;
+            await _nc.start();
+            lastCalSampleRef.current = Date.now();
+            setIsMuse(true);
+            setStatusMsg('✓ Muse reconnected');
+            zipSamples(_nc.eegReadings).subscribe({
+              next: (reading) => {
+                lastCalSampleRef.current = Date.now();
+                const s = {
+                  tp9:  (Number.isFinite(reading.data[0] as number) ? reading.data[0] as number : 0),
+                  af7:  (Number.isFinite(reading.data[1] as number) ? reading.data[1] as number : 0),
+                  af8:  (Number.isFinite(reading.data[2] as number) ? reading.data[2] as number : 0),
+                  tp10: (Number.isFinite(reading.data[3] as number) ? reading.data[3] as number : 0),
+                };
+                const p2 = phaseRef.current;
+                if (p2 === 'baseline') baselineBuf.current.push(s);
+                else if (p2 === 'song_playing') songBufs.current[songIndexRef.current].push(s);
+              },
+              error: () => { /* give up — user will see dropout warning */ },
+              complete: () => {},
+            });
+          } catch {
+            if (phaseRef.current !== 'done' && phaseRef.current !== 'saving') {
+              setErrorMsg('EEG stream ended and reconnect failed. Please restart calibration.');
+              setPhase('error');
+            }
+          }
+        })();
       },
     });
 

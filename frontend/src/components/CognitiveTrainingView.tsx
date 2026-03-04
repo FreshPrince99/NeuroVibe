@@ -60,53 +60,67 @@ const ACTIVITIES: Array<{ id: ActivityId; title: string; description: string; ch
   },
 ];
 
-const clamp = (value: number, min = 0, max = 1) => Math.max(min, Math.min(max, value));
+const toFinite = (value: number | null | undefined, fallback = 0) => (
+  Number.isFinite(value) ? Number(value) : fallback
+);
+
+const clamp = (value: number, min = 0, max = 1) => {
+  const safeValue = toFinite(value, min);
+  return Math.max(min, Math.min(max, safeValue));
+};
 
 function stdDev(values: number[]) {
-  if (!values.length) return 0;
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (!finite.length) return 0;
+  const mean = finite.reduce((a, b) => a + b, 0) / finite.length;
+  const variance = finite.reduce((sum, value) => sum + (value - mean) ** 2, 0) / finite.length;
   return Math.sqrt(variance);
 }
 
 function average(values: number[]) {
-  if (!values.length) return 0;
-  return values.reduce((a, b) => a + b, 0) / values.length;
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (!finite.length) return 0;
+  return finite.reduce((a, b) => a + b, 0) / finite.length;
 }
 
 function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedVAD?: VADData | null) {
-  const window = eegData.slice(-96);
+  const window = eegData.slice(-96).map((sample) => ({
+    tp9: toFinite(sample.tp9),
+    af7: toFinite(sample.af7),
+    af8: toFinite(sample.af8),
+    tp10: toFinite(sample.tp10),
+  }));
 
-  const af7 = window.map((x) => x.af7);
-  const af8 = window.map((x) => x.af8);
-  const tp9 = window.map((x) => x.tp9);
-  const tp10 = window.map((x) => x.tp10);
+  const af7 = window.map((sample) => sample.af7);
+  const af8 = window.map((sample) => sample.af8);
+  const tp9 = window.map((sample) => sample.tp9);
+  const tp10 = window.map((sample) => sample.tp10);
 
-  const af7Energy = average(af7.map((v) => Math.abs(v)));
-  const af8Energy = average(af8.map((v) => Math.abs(v)));
-  const tp9Energy = average(tp9.map((v) => Math.abs(v)));
-  const tp10Energy = average(tp10.map((v) => Math.abs(v)));
+  const af7Energy = average(af7.map((value) => Math.abs(value)));
+  const af8Energy = average(af8.map((value) => Math.abs(value)));
+  const tp9Energy = average(tp9.map((value) => Math.abs(value)));
+  const tp10Energy = average(tp10.map((value) => Math.abs(value)));
 
   const frontalEnergy = (af7Energy + af8Energy) / 2;
   const temporalEnergy = (tp9Energy + tp10Energy) / 2;
-  const asymmetry = Math.abs(af7Energy - af8Energy) / (frontalEnergy + 1e-6);
+  const asymmetry = Math.abs(af7Energy - af8Energy) / Math.max(frontalEnergy, 1e-6);
   const symmetry = clamp(1 - asymmetry);
 
-  const overallStd = stdDev(window.flatMap((s) => [s.tp9, s.af7, s.af8, s.tp10]).map((v) => Math.abs(v)));
+  const overallStd = stdDev(window.flatMap((sample) => [sample.tp9, sample.af7, sample.af8, sample.tp10]).map((value) => Math.abs(value)));
   const stability = clamp(1 - overallStd / 250);
-  const engagement = clamp((frontalEnergy + 1) / (temporalEnergy + frontalEnergy + 2));
+  const engagement = clamp((frontalEnergy + 1) / Math.max(temporalEnergy + frontalEnergy + 2, 1e-6));
 
-  const arousal = predictedVAD?.arousal ?? 0.5;
-  const valence = predictedVAD?.valence ?? 0.5;
+  const arousal = clamp(toFinite(predictedVAD?.arousal, 0.5));
+  const valence = clamp(toFinite(predictedVAD?.valence, 0.5));
 
   const focus = clamp(0.45 * engagement + 0.35 * stability + 0.2 * arousal);
   const calm = clamp(0.4 * symmetry + 0.4 * (1 - arousal) + 0.2 * stability);
   const control = clamp((focus + calm + valence) / 3);
 
-  const ppgWindow = ppgData.slice(-160);
+  const ppgWindow = ppgData.slice(-160).map((value) => toFinite(value));
   const ppgDiff = ppgWindow.slice(1).map((value, index) => Math.abs(value - ppgWindow[index]));
   const ppgRegulation = ppgWindow.length > 20
-    ? clamp(1 - stdDev(ppgDiff) / (average(ppgDiff) + 8))
+    ? clamp(1 - stdDev(ppgDiff) / Math.max(average(ppgDiff) + 8, 1e-6))
     : 0;
 
   return {
@@ -117,6 +131,74 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
     stability,
     ppgRegulation,
   };
+}
+
+function RunningVisualization({ selectedActivity, progressValue, metrics }: { selectedActivity: ActivityId; progressValue: number; metrics: ReturnType<typeof calculateBrainMetrics> }) {
+  if (selectedActivity === 'neural-ball') {
+    return (
+      <div className="mx-auto flex h-64 w-64 items-center justify-center rounded-full border border-fuchsia-400/50 bg-fuchsia-500/10" style={{ transform: `scale(${0.7 + progressValue * 0.8})`, transition: 'transform 450ms ease' }}>
+        <span className="text-2xl font-semibold">{Math.round(progressValue * 100)}%</span>
+      </div>
+    );
+  }
+
+  if (selectedActivity === 'neuro-drive') {
+    const speed = Math.round(progressValue * 180);
+    const laneOffset = (metrics.stability - 0.5) * 80;
+    return (
+      <div className="mx-auto w-full max-w-4xl rounded-2xl border border-blue-400/40 bg-gradient-to-b from-gray-900 to-black p-6">
+        <div className="relative h-56 overflow-hidden rounded-xl border border-gray-700 bg-gray-950">
+          <div className="absolute inset-0 bg-[linear-gradient(to_right,transparent_48%,rgba(255,255,255,0.2)_50%,transparent_52%)] bg-[length:100%_32px] animate-pulse" />
+          <div
+            className="absolute bottom-4 h-14 w-20 rounded-md bg-blue-500 shadow-[0_0_25px_rgba(59,130,246,0.65)] transition-all duration-300"
+            style={{ left: `calc(50% - 40px + ${laneOffset}px)` }}
+          >
+            <div className="mx-auto mt-1 h-2 w-10 rounded-full bg-white/70" />
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Speed<br /><span className="text-xl text-blue-300">{speed} km/h</span></div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Lane Stability<br /><span className="text-xl text-blue-300">{Math.round(metrics.stability * 100)}%</span></div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Throttle Control<br /><span className="text-xl text-blue-300">{Math.round(metrics.control * 100)}%</span></div>
+        </div>
+      </div>
+    );
+  }
+
+  if (selectedActivity === 'signal-shield') {
+    const shieldOpacity = 0.2 + progressValue * 0.8;
+    const shieldScale = 0.8 + metrics.symmetry * 0.35;
+    return (
+      <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-5 rounded-2xl border border-emerald-400/30 bg-emerald-500/5 p-6">
+        <div className="relative flex h-64 w-64 items-center justify-center">
+          <div className="absolute h-60 w-52 rounded-[45%_45%_35%_35%] border-4 border-emerald-300 transition-all duration-300" style={{ transform: `scale(${shieldScale})`, opacity: shieldOpacity }} />
+          <div className="h-44 w-36 rounded-[45%_45%_35%_35%] border-2 border-emerald-100/80 bg-emerald-200/10" />
+        </div>
+        <div className="grid w-full grid-cols-2 gap-3 text-sm">
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Shield Strength<br /><span className="text-xl text-emerald-300">{Math.round(progressValue * 100)}%</span></div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Frontal Symmetry<br /><span className="text-xl text-emerald-300">{Math.round(metrics.symmetry * 100)}%</span></div>
+        </div>
+      </div>
+    );
+  }
+
+  const pulseHeight = 24 + Math.round(progressValue * 72);
+  return (
+    <div className="mx-auto w-full max-w-3xl rounded-2xl border border-rose-400/40 bg-rose-500/5 p-6">
+      <div className="relative h-56 overflow-hidden rounded-xl border border-gray-700 bg-black">
+        <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 border-t border-gray-700" />
+        <div
+          className="absolute bottom-1/2 left-0 right-0 mx-6 border-t-4 border-rose-300 transition-all duration-300"
+          style={{ transform: `translateY(${pulseHeight / -2}px)` }}
+        />
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Pulse Smoothness<br /><span className="text-xl text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</span></div>
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Calm Drift<br /><span className="text-xl text-rose-300">{Math.round(metrics.calm * 100)}%</span></div>
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Neural Control<br /><span className="text-xl text-rose-300">{Math.round(metrics.control * 100)}%</span></div>
+      </div>
+    </div>
+  );
 }
 
 export default function CognitiveTrainingView({
@@ -162,7 +244,13 @@ export default function CognitiveTrainingView({
     setPeakValue((previous) => Math.max(previous, newProgress));
     setSessionStats((previous) => [
       ...previous,
-      { focus: metrics.focus, calm: metrics.calm, control: metrics.control, ppg: metrics.ppgRegulation, symmetry: metrics.symmetry },
+      {
+        focus: clamp(metrics.focus),
+        calm: clamp(metrics.calm),
+        control: clamp(metrics.control),
+        ppg: clamp(metrics.ppgRegulation),
+        symmetry: clamp(metrics.symmetry),
+      },
     ].slice(-1000));
   }, [metrics, phase, selectedActivity]);
 
@@ -214,11 +302,11 @@ export default function CognitiveTrainingView({
     setPeakValue(0);
   };
 
-  const avgFocus = average(sessionStats.map((x) => x.focus));
-  const avgCalm = average(sessionStats.map((x) => x.calm));
-  const avgControl = average(sessionStats.map((x) => x.control));
-  const avgPpg = average(sessionStats.map((x) => x.ppg));
-  const avgSymmetry = average(sessionStats.map((x) => x.symmetry));
+  const avgFocus = average(sessionStats.map((sample) => sample.focus));
+  const avgCalm = average(sessionStats.map((sample) => sample.calm));
+  const avgControl = average(sessionStats.map((sample) => sample.control));
+  const avgPpg = average(sessionStats.map((sample) => sample.ppg));
+  const avgSymmetry = average(sessionStats.map((sample) => sample.symmetry));
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -282,7 +370,7 @@ export default function CognitiveTrainingView({
                 <select
                   className="ml-3 rounded-lg border border-gray-700 bg-black px-3 py-2"
                   value={durationMinutes}
-                  onChange={(e) => setDurationMinutes(parseInt(e.target.value, 10))}
+                  onChange={(event) => setDurationMinutes(parseInt(event.target.value, 10))}
                 >
                   {[3, 4, 5].map((option) => <option key={option} value={option}>{option} minutes</option>)}
                 </select>
@@ -300,15 +388,13 @@ export default function CognitiveTrainingView({
               <p className="mt-2 text-sm text-fuchsia-300">{Math.floor(remainingSeconds / 60)}:{String(remainingSeconds % 60).padStart(2, '0')} remaining</p>
             </div>
 
-            <div className="mx-auto flex h-64 w-64 items-center justify-center rounded-full border border-fuchsia-400/50 bg-fuchsia-500/10" style={{ transform: `scale(${0.7 + progressValue * 0.8})`, transition: 'transform 450ms ease' }}>
-              <span className="text-2xl font-semibold">{Math.round(progressValue * 100)}%</span>
-            </div>
+            <RunningVisualization selectedActivity={selectedActivity} progressValue={progressValue} metrics={metrics} />
 
             <div className="mx-auto grid max-w-3xl grid-cols-2 gap-3 text-sm md:grid-cols-4">
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Focus<br />{Math.round(metrics.focus * 100)}%</div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Calm<br />{Math.round(metrics.calm * 100)}%</div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Control<br />{Math.round(metrics.control * 100)}%</div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">PPG Reg.<br />{Math.round(metrics.ppgRegulation * 100)}%</div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Focus<br />{Math.round(clamp(metrics.focus) * 100)}%</div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Calm<br />{Math.round(clamp(metrics.calm) * 100)}%</div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Control<br />{Math.round(clamp(metrics.control) * 100)}%</div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">PPG Reg.<br />{Math.round(clamp(metrics.ppgRegulation) * 100)}%</div>
             </div>
 
             <button onClick={finishEarly} className="rounded-full border border-gray-700 px-6 py-2 text-sm text-gray-300">Finish now</button>
@@ -322,12 +408,12 @@ export default function CognitiveTrainingView({
               <p className="mt-2 text-gray-400">Useful state summary from your selected cognitive activity.</p>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Average Focus <p className="mt-2 text-2xl">{Math.round(avgFocus * 100)}%</p></div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Average Calm <p className="mt-2 text-2xl">{Math.round(avgCalm * 100)}%</p></div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Cognitive Control <p className="mt-2 text-2xl">{Math.round(avgControl * 100)}%</p></div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Frontal Symmetry <p className="mt-2 text-2xl">{Math.round(avgSymmetry * 100)}%</p></div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">PPG Regulation <p className="mt-2 text-2xl">{Math.round(avgPpg * 100)}%</p></div>
-              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Peak Activity Score <p className="mt-2 text-2xl">{Math.round(peakValue * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Average Focus <p className="mt-2 text-2xl">{Math.round(clamp(avgFocus) * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Average Calm <p className="mt-2 text-2xl">{Math.round(clamp(avgCalm) * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Cognitive Control <p className="mt-2 text-2xl">{Math.round(clamp(avgControl) * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Frontal Symmetry <p className="mt-2 text-2xl">{Math.round(clamp(avgSymmetry) * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">PPG Regulation <p className="mt-2 text-2xl">{Math.round(clamp(avgPpg) * 100)}%</p></div>
+              <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">Peak Activity Score <p className="mt-2 text-2xl">{Math.round(clamp(peakValue) * 100)}%</p></div>
             </div>
 
             <div className="rounded-2xl border border-fuchsia-500/40 bg-fuchsia-500/10 p-5 text-sm text-fuchsia-100">

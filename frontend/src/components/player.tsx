@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useState, forwardRef, useImperativeHandle, useRef, useCallback } from "react";
 
 interface Track {
   name: string;
@@ -8,6 +8,7 @@ interface Track {
   album: string;
   albumArt: string;
   uri: string;
+  durationMs: number;
 }
 
 interface PlayerProps {
@@ -18,262 +19,487 @@ export interface PlayerRef {
   pause: () => void;
 }
 
+type SessionMode = "focus" | "relaxation" | "cognitive";
+
+type SpotifyArtist = { name: string };
+type SpotifyImage = { url: string };
+type SpotifyTrack = {
+  name: string;
+  uri: string;
+  duration_ms: number;
+  is_local?: boolean;
+  artists: SpotifyArtist[];
+  album: { name: string; images: SpotifyImage[] };
+};
+type SpotifyAudioFeatures = {
+  id: string;
+  energy?: number;
+  valence?: number;
+  danceability?: number;
+};
+type SpotifyTrackMeta = {
+  id: string;
+  popularity?: number;
+};
+
+type SpotifyPlayerState = {
+  paused: boolean;
+  position: number;
+  duration: number;
+  track_window: { current_track: SpotifyTrack };
+};
+
+type SpotifyPlayer = {
+  pause: () => Promise<void>;
+  togglePlay: () => Promise<void>;
+  disconnect: () => void;
+  connect: () => Promise<boolean>;
+  addListener: (event: string, callback: (state: unknown) => void) => boolean;
+};
+
+const stressEmotions = new Set(["stressed", "sad", "anxious", "angry", "tired"]);
+const positiveEmotions = new Set(["relaxed", "calm", "content", "happy", "neutral"]);
+
 const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [player, setPlayer] = useState<any>(null);
+  const [player, setPlayer] = useState<SpotifyPlayer | null>(null);
   const [deviceId, setDeviceId] = useState<string>("");
-  const [accessToken, setAccessToken] = useState<string>("");
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isClient, setIsClient] = useState(false);
+  const [accessToken] = useState<string>(() => (typeof window !== "undefined" ? localStorage.getItem("spotify_access_token") || "" : ""));
+  const [isAuthenticated, setIsAuthenticated] = useState(Boolean(typeof window !== "undefined" ? localStorage.getItem("spotify_access_token") : ""));
+  const [mode] = useState<SessionMode>(() => {
+    if (typeof window === "undefined") return "focus";
+    const storedMode = localStorage.getItem("neurovibe_mode");
+    return storedMode === "relaxation" ? "relaxation" : "focus";
+  });
+  const [focusEnergy] = useState<"energetic" | "calm">(() => {
+    if (typeof window === "undefined") return "calm";
+    const stored = localStorage.getItem("neurovibe_focus_energy");
+    return stored === "energetic" ? "energetic" : "calm";
+  });
+  const [preferredGenres] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    const stored = localStorage.getItem("neurovibe_music_genres");
+    if (!stored) return [];
+    try {
+      const parsed = JSON.parse(stored);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
 
-  // Mark when client-side is ready
-  useEffect(() => {
-    setIsClient(true);
-  }, []);
+  // Always points to the freshest access token; updated by the refresh timer.
+  // Using a ref (instead of state) avoids re-initialising the SDK on every refresh.
+  const accessTokenRef = useRef<string>(accessToken);
+  // Refs for emotion and deviceId so callbacks stay stable and never trigger
+  // the SDK useEffect to re-run (which would call disconnect).
+  const emotionRef = useRef<string>(emotion);
+  const deviceIdRef = useRef<string>("");
 
-  // Expose pause method to parent
+  // Keep refs in sync on every render without causing re-renders.
+  emotionRef.current = emotion;
+
+  const emotionCountsRef = useRef<Record<string, number>>({});
+  const endHandledForTrackRef = useRef<string>("");
+  const activeTrackUriRef = useRef<string>("");
+  const trackEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasStartedPlaybackRef = useRef(false);
+
+  const [positionMs, setPositionMs] = useState(0);
+  const positionMsRef = useRef(0);
+
+
   useImperativeHandle(ref, () => ({
     pause: () => {
       if (player && isPlaying) {
-        player.pause();
+        void player.pause();
       }
     }
   }));
 
-  // Fetch access token from localStorage (only on client)
-  useEffect(() => {
-    if (!isClient) return;
-    
-    const token = localStorage.getItem("spotify_access_token");
-    console.log("🔍 Checking for Spotify token in localStorage...");
-    console.log("Token exists:", !!token);
-    
-    if (token) {
-      console.log("✓ Token found, length:", token.length);
-      console.log("Token preview:", token.substring(0, 30) + "...");
-      setAccessToken(token);
-      setIsAuthenticated(true);
-    } else {
-      console.log("✗ No Spotify token found in localStorage");
-      console.log("User needs to authenticate with Spotify first");
-      setIsAuthenticated(false);
+
+  // Stable — reads emotion from ref, never needs to change.
+  const getDominantEmotion = useCallback(() => {
+    const counts = emotionCountsRef.current;
+    const entries = Object.entries(counts);
+    if (entries.length === 0) return emotionRef.current.toLowerCase();
+    entries.sort((a, b) => b[1] - a[1]);
+    return entries[0][0];
+  }, []); // no deps — uses refs only
+
+  const buildTrackQuery = useCallback((dominantEmotion: string) => {
+    const genresText = preferredGenres.length > 0 ? preferredGenres.join(" ") : "instrumental";
+    const normalizedEmotion = dominantEmotion.toLowerCase();
+    // Translate user energy preference into search terms
+    const energyWord = focusEnergy === "energetic" ? "upbeat energetic uptempo" : "calm relaxing slow";
+
+    if (mode === "relaxation") {
+      if (stressEmotions.has(normalizedEmotion)) {
+        return `calming uplifting ${energyWord} relaxation ${genresText}`;
+      }
+      if (positiveEmotions.has(normalizedEmotion)) {
+        return `gentle ${energyWord} relaxing ${genresText}`;
+      }
+      return `peaceful anti-stress ${energyWord} ${genresText}`;
     }
-  }, [isClient]);
+
+    // Focus mode
+    if (stressEmotions.has(normalizedEmotion)) {
+      // When stressed, counter with calming music regardless of energy pref
+      return `calming soothing focus ${genresText}`;
+    }
+
+    if (focusEnergy === "energetic") {
+      return `energetic upbeat high-energy deep focus ${genresText}`;
+    }
+
+    return `calm slow relaxing deep focus ${genresText}`;
+  }, [focusEnergy, mode, preferredGenres]);
+
+  const fetchAudioFeatures = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return { features: {}, meta: {} };
+
+    // Prefer server-side client-credentials (avoids 403 from Web API on some accounts)
+    try {
+      const res = await fetch("/api/spotify/audio-features", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const feats: SpotifyAudioFeatures[] = data?.audio_features ?? [];
+        const tracks: SpotifyTrackMeta[] = data?.tracks ?? [];
+        const fMap: Record<string, SpotifyAudioFeatures> = {};
+        const tMap: Record<string, SpotifyTrackMeta> = {};
+        feats.forEach(f => { if (f?.id) fMap[f.id] = f; });
+        tracks.forEach(t => { if (t?.id) tMap[t.id] = t; });
+        return { features: fMap, meta: tMap };
+      }
+    } catch {
+      // fall through to client token
+    }
+
+    const token = accessTokenRef.current;
+    if (!token) return { features: {}, meta: {} };
+    const res = await fetch(
+      `https://api.spotify.com/v1/audio-features?ids=${ids.join(",")}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return { features: {}, meta: {} };
+    const data = await res.json();
+    const feats: SpotifyAudioFeatures[] = data?.audio_features ?? [];
+    const fMap: Record<string, SpotifyAudioFeatures> = {};
+    feats.forEach(f => { if (f?.id) fMap[f.id] = f; });
+    return { features: fMap, meta: {} };
+  }, []);
+
+  const scoreTrack = useCallback(
+    (dominantEmotion: string, feature?: SpotifyAudioFeatures, meta?: SpotifyTrackMeta) => {
+    if (!feature) return 0;
+    const energy = feature.energy ?? 0.5;
+    const valence = feature.valence ?? 0.5;
+    const danceability = feature.danceability ?? 0.5;
+    const popularity = meta?.popularity ?? 50;
+    const normalizedEmotion = dominantEmotion.toLowerCase();
+
+    let targetEnergy = focusEnergy === "energetic" ? 0.75 : 0.35;
+    if (mode === "relaxation") targetEnergy = 0.25;
+    if (stressEmotions.has(normalizedEmotion)) targetEnergy = 0.20;
+
+    const energyScore = 1 - Math.abs(energy - targetEnergy);
+    const valenceScore = stressEmotions.has(normalizedEmotion) || mode === "relaxation"
+      ? valence
+      : valence * 0.3;
+    const danceScore = mode === "relaxation" ? (1 - danceability) : danceability;
+    const popScore = Math.min(Math.max(popularity / 100, 0), 1);
+    return energyScore + 0.3 * valenceScore + 0.15 * danceScore + 0.05 * popScore;
+  }, [focusEnergy, mode]);
+
+  const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
+    const token = accessTokenRef.current;
+    const device = deviceIdRef.current;
+    if (!device || !token) return false;
+
+    const query = buildTrackQuery(dominantEmotion);
+    console.log(`🎵 Searching Spotify | mode=${mode} energy=${focusEnergy} genres=[${preferredGenres.join(", ")}] query="${query}"`);
+    const searchQuery = encodeURIComponent(query);
+
+    const searchResponse = await fetch(
+      `https://api.spotify.com/v1/search?q=${searchQuery}&type=track&limit=20&market=US`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+
+    if (!searchResponse.ok) {
+      console.warn("Spotify search failed:", searchResponse.status);
+      return false;
+    }
+
+    const searchData = await searchResponse.json();
+    const tracks: SpotifyTrack[] = (searchData.tracks?.items || []).filter(
+      (track: SpotifyTrack) => track?.uri && !track?.is_local
+    );
+
+    if (tracks.length === 0) return false;
+
+    const ids = tracks
+      .map(t => t.uri?.split(":").pop())
+      .filter((id): id is string => Boolean(id))
+      .slice(0, 50);
+
+    const { features: featuresMap, meta: metaMap } = await fetchAudioFeatures(ids);
+    const scored = tracks.map(t => {
+      const id = t.uri?.split(":").pop() ?? "";
+      const score = scoreTrack(dominantEmotion, featuresMap[id], metaMap[id]);
+      return { track: t, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const chosenTrack = scored[0]?.track ?? tracks[Math.floor(Math.random() * tracks.length)];
+
+    const playResponse = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ uris: [chosenTrack.uri] }),
+    });
+
+    if (!playResponse.ok) {
+      console.warn("Spotify play failed:", playResponse.status);
+      return false;
+    }
+
+    emotionCountsRef.current = {};
+    return true;
+  // deviceId and accessToken are read from refs \u2014 intentionally excluded from deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildTrackQuery, focusEnergy, mode, preferredGenres]);
+
+  const queueNextTrackFromSummary = useCallback(async (trackUri: string) => {
+    if (!trackUri || endHandledForTrackRef.current === trackUri) return;
+
+    // Mark as handled IMMEDIATELY to prevent duplicate calls from timer + SDK event.
+    // Without this, a failed search would leave the ref unset, causing infinite retries
+    // of the same failing query — making the song appear stuck/repeating.
+    endHandledForTrackRef.current = trackUri;
+
+    const dominantEmotion = getDominantEmotion();
+    const started = await playTrackForEmotionSummary(dominantEmotion);
+    if (!started) {
+      console.warn("[Player] Failed to start next track — will retry on next emotion update.");
+      // Reset after a delay so a future emotion change can trigger a retry
+      // with a potentially different search query (different dominant emotion).
+      setTimeout(() => {
+        if (endHandledForTrackRef.current === trackUri) {
+          endHandledForTrackRef.current = "";
+        }
+      }, 15_000);
+    }
+  }, [getDominantEmotion, playTrackForEmotionSummary]);
+
+  // Proactively refresh the Spotify token ~5 min before it expires.
+  useEffect(() => {
+    const doRefresh = async () => {
+      const refreshToken = localStorage.getItem("spotify_refresh_token");
+      if (!refreshToken) return;
+      try {
+        const res = await fetch("/api/auth/spotify/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        const data = await res.json();
+        if (data.access_token) {
+          accessTokenRef.current = data.access_token;
+          localStorage.setItem("spotify_access_token", data.access_token);
+          const expiry = Date.now() + (data.expires_in ?? 3600) * 1000;
+          localStorage.setItem("spotify_token_expiry", expiry.toString());
+          console.log("✓ Spotify token refreshed");
+        }
+      } catch (e) {
+        console.warn("Spotify token refresh failed:", e);
+      }
+    };
+
+    // Schedule first refresh 5 min before the stored expiry, then every 55 min.
+    const expiry = parseInt(localStorage.getItem("spotify_token_expiry") || "0");
+    const refreshIn = Math.max(expiry - Date.now() - 5 * 60 * 1000, 30_000);
+    const t = setTimeout(() => {
+      void doRefresh();
+    }, refreshIn);
+    const interval = setInterval(() => void doRefresh(), 55 * 60 * 1000);
+
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+    };
+  }, []);
 
   // Initialize Spotify Web Playback SDK
   useEffect(() => {
-    if (!accessToken || !isClient) {
-      console.log("Waiting for access token or client ready...");
-      return;
-    }
+    if (!accessToken) return;
 
-    console.log("Initializing Spotify Web Playback SDK...");
     const script = document.createElement("script");
     script.src = "https://sdk.scdn.co/spotify-player.js";
     script.async = true;
     document.body.appendChild(script);
 
+    let spotifyPlayer: SpotifyPlayer | null = null;
+
     window.onSpotifyWebPlaybackSDKReady = () => {
-      console.log("Spotify SDK Ready, creating player...");
-      const spotifyPlayer = new window.Spotify.Player({
+      const sp: SpotifyPlayer = new window.Spotify.Player({
         name: "NeuroVibe Player",
-        getOAuthToken: (cb: (token: string) => void) => {
-          console.log("SDK requesting OAuth token...");
-          cb(accessToken);
-        },
+        // Always read from the ref so the SDK gets a fresh token after refresh.
+        getOAuthToken: (cb: (token: string) => void) => cb(accessTokenRef.current),
         volume: 0.5,
       });
+      spotifyPlayer = sp;
 
-      spotifyPlayer.addListener("ready", ({ device_id }: { device_id: string }) => {
-        console.log("✓ Spotify Player Ready with Device ID:", device_id);
-        setDeviceId(device_id);
+      sp.addListener("ready", (state: unknown) => {
+        const typedState = state as { device_id: string };
+        deviceIdRef.current = typedState.device_id;
+        setDeviceId(typedState.device_id);
       });
 
-      spotifyPlayer.addListener("not_ready", ({ device_id }: { device_id: string }) => {
-        console.log("✗ Device ID has gone offline:", device_id);
-      });
+      sp.addListener("player_state_changed", (state: unknown) => {
+        const typedState = state as SpotifyPlayerState | null;
+        if (!typedState) return;
 
-      spotifyPlayer.addListener("player_state_changed", (state: any) => {
-        if (!state) return;
-        
-        const track = state.track_window.current_track;
+        const track = typedState.track_window.current_track;
+        const trackUri = track.uri;
+
+        if (activeTrackUriRef.current !== trackUri) {
+          activeTrackUriRef.current = trackUri;
+          endHandledForTrackRef.current = "";
+          if (trackEndTimerRef.current) {
+            clearTimeout(trackEndTimerRef.current);
+            trackEndTimerRef.current = null;
+          }
+        }
+
         setCurrentTrack({
           name: track.name,
-          artist: track.artists.map((a: any) => a.name).join(", "),
+          artist: track.artists.map((a: SpotifyArtist) => a.name).join(", "),
           album: track.album.name,
           albumArt: track.album.images[0]?.url || "",
           uri: track.uri,
+          durationMs: typedState.duration,
         });
-        setIsPlaying(!state.paused);
-      });
 
-      spotifyPlayer.addListener("initialization_error", ({ message }: { message: string }) => {
-        console.error("❌ Initialization error:", message);
-      });
+        positionMsRef.current = typedState.position;
+        setPositionMs(typedState.position);
+        setIsPlaying(!typedState.paused);
 
-      spotifyPlayer.addListener("authentication_error", ({ message }: { message: string }) => {
-        console.error("❌ Authentication error:", message);
-        console.error("Current access token exists:", !!accessToken);
-        console.error("Token preview:", accessToken ? accessToken.substring(0, 20) + "..." : "none");
-      });
+        const remainingMs = Math.max(typedState.duration - typedState.position, 0);
 
-      spotifyPlayer.addListener("account_error", ({ message }: { message: string }) => {
-        console.error("❌ Account error:", message);
-        console.error("Note: Spotify Premium is required for Web Playback SDK");
-      });
+        if (!typedState.paused && typedState.duration > 0) {
+          // Track is playing — (re)schedule the end-of-track callback.
+          if (trackEndTimerRef.current) clearTimeout(trackEndTimerRef.current);
+          trackEndTimerRef.current = setTimeout(() => {
+            if (activeTrackUriRef.current !== trackUri) return;
+            void queueNextTrackFromSummary(trackUri);
+          }, remainingMs + 750);
+        }
+        // IMPORTANT: Do NOT cancel the timer when paused.
+        // The Spotify SDK fires player_state_changed with paused=true, position=0
+        // when a track ends naturally (it loops back to start). Cancelling the timer
+        // here would prevent the next song from ever being queued.
+        // The timer is self-guarded: if (activeTrackUriRef.current !== trackUri) return.
 
-      spotifyPlayer.addListener("playback_error", ({ message }: { message: string }) => {
-        console.error("❌ Playback error:", message);
-      });
-
-      spotifyPlayer.connect().then((success: boolean) => {
-        if (success) {
-          console.log("✓ The Web Playback SDK successfully connected to Spotify!");
-        } else {
-          console.error("✗ The Web Playback SDK could not connect to Spotify");
-          console.error("This might be due to:");
-          console.error("1. Invalid or expired access token");
-          console.error("2. No Spotify Premium account");
-          console.error("3. Network connectivity issues");
+        // Detect end via position proximity — catches end slightly earlier than the timer.
+        // Also catches the Spotify SDK's "loop back to 0" behaviour: when a track ends
+        // naturally the SDK fires paused=true, position=0 — that is NOT a real pause,
+        // the track is over.
+        const atEnd = typedState.duration > 0 &&
+          typedState.position >= typedState.duration - 1500;
+        const loopedToStart = typedState.paused &&
+          typedState.position === 0 &&
+          typedState.duration > 0;
+        if (atEnd || loopedToStart) {
+          void queueNextTrackFromSummary(trackUri);
         }
       });
 
-      setPlayer(spotifyPlayer);
+      sp.connect().then((success: boolean) => {
+        if (!success) {
+          setIsAuthenticated(false);
+        }
+      });
+
+      setPlayer(sp);
     };
 
     return () => {
-      if (player) {
-        player.disconnect();
+      if (trackEndTimerRef.current) {
+        clearTimeout(trackEndTimerRef.current);
+        trackEndTimerRef.current = null;
+      }
+      if (spotifyPlayer) {
+        spotifyPlayer.disconnect();
       }
     };
-  }, [accessToken, isClient]);
+  // Only re-run if the access token itself changes (e.g. a full re-auth).
+  // queueNextTrackFromSummary is stable and safe to include.
+  // callbacks, so they must NOT be listed here or emotion changes will disconnect SDK.
+  }, [accessToken, queueNextTrackFromSummary]);
 
-  // Search and play music based on emotion
+  // Trigger the very first track once the device is ready. Guarded by ref so
+  // changing emotion later never re-fires this. If the initial play fails (e.g.
+  // Spotify not ready yet) the flag is reset so the next deviceId change retries.
   useEffect(() => {
-    if (!deviceId || !accessToken) {
-      console.log("Waiting for device or token. Device:", !!deviceId, "Token:", !!accessToken);
-      return;
-    }
-
-    const searchAndPlay = async () => {
-      try {
-        console.log("Searching for", emotion, "mood playlists");
-        
-        // Search for playlists based on emotion
-        const searchQuery = encodeURIComponent(`${emotion} mood`);
-        const searchResponse = await fetch(
-          `https://api.spotify.com/v1/search?q=${searchQuery}&type=playlist&limit=10&market=US`,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-          }
-        );
-        
-        if (!searchResponse.ok) {
-          console.error("Search API error:", searchResponse.status);
-          const errorText = await searchResponse.text();
-          console.error("Search error details:", errorText);
-          return;
-        }
-        
-        const searchData = await searchResponse.json();
-        console.log("Full search response:", JSON.stringify(searchData, null, 2));
-        
-        // Check the actual structure
-        if (!searchData.playlists || !searchData.playlists.items) {
-          console.error("Unexpected response structure:", searchData);
-          return;
-        }
-        
-        const playlists = searchData.playlists.items.filter((p: any) => p !== null && p.id);
-        console.log("Number of valid playlists found:", playlists.length);
-        
-        if (playlists.length > 0) {
-          const firstPlaylist = playlists[0];
-          console.log("First playlist:", {
-            id: firstPlaylist.id,
-            name: firstPlaylist.name,
-            owner: firstPlaylist.owner?.display_name
-          });
-          
-          // Get tracks from the first playlist
-          const playlistId = firstPlaylist.id;
-          
-          const tracksResponse = await fetch(
-            `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&market=US`,
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-              },
-            }
-          );
-          
-          if (!tracksResponse.ok) {
-            console.error("Tracks API error:", tracksResponse.status);
-            const errorText = await tracksResponse.text();
-            console.error("Tracks API error details:", errorText);
-            return;
-          }
-          
-          const tracksData = await tracksResponse.json();
-          const tracks = tracksData.items?.filter((item: any) => item?.track?.uri && !item.track.is_local) || [];
-          
-          console.log("Found", tracks.length, "playable tracks in playlist");
-          
-          if (tracks.length > 0) {
-            // Pick a random track
-            const randomTrack = tracks[Math.floor(Math.random() * tracks.length)];
-            const trackUri = randomTrack.track.uri;
-            const trackName = randomTrack.track.name;
-            const artistName = randomTrack.track.artists[0]?.name;
-            
-            console.log("Attempting to play:", trackName, "by", artistName);
-            console.log("Track URI:", trackUri);
-            console.log("Device ID:", deviceId);
-            
-            // Play the track
-            const playResponse = await fetch(
-              `https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`,
-              {
-                method: "PUT",
-                headers: {
-                  Authorization: `Bearer ${accessToken}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  uris: [trackUri],
-                }),
-              }
-            );
-            
-            console.log("Play response status:", playResponse.status);
-            
-            if (!playResponse.ok) {
-              const errorText = await playResponse.text();
-              console.error("Error playing track. Status:", playResponse.status);
-              console.error("Error details:", errorText);
-            } else {
-              console.log("Successfully initiated playback");
-            }
-          } else {
-            console.error("No playable tracks found in playlist");
-          }
-        } else {
-          console.error("No valid playlists found");
-        }
-      } catch (error) {
-        console.error("Error in searchAndPlay:", error);
+    if (!deviceId || !accessToken || hasStartedPlaybackRef.current) return;
+    hasStartedPlaybackRef.current = true;
+    void playTrackForEmotionSummary(emotionRef.current.toLowerCase()).then(success => {
+      if (!success) {
+        // Allow retry when the SDK fires deviceId again after reconnect.
+        hasStartedPlaybackRef.current = false;
       }
-    };
+    });
+  // emotion intentionally omitted — emotionRef.current is read at call time.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, deviceId, playTrackForEmotionSummary]);
 
-    searchAndPlay();
-  }, [emotion, deviceId, accessToken]);
+  // Tick position forward every second while playing (SDK events are not 1-per-second).
+  // Also acts as a safety net: if the Spotify SDK state event never fires at track end,
+  // the ticker catches it and queues the next track.
+  useEffect(() => {
+    if (!isPlaying) return;
+    const durMs = currentTrack?.durationMs ?? 0;
+    const id = setInterval(() => {
+      positionMsRef.current += 1000;
+      setPositionMs(positionMsRef.current);
+      // Safety fallback: detect end of track from local clock if SDK event is late.
+      if (durMs > 0 && positionMsRef.current >= durMs - 800 && activeTrackUriRef.current) {
+        void queueNextTrackFromSummary(activeTrackUriRef.current);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  // currentTrack?.durationMs ensures the interval restarts with the correct duration
+  // when the track changes. queueNextTrackFromSummary is stable (useCallback).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, currentTrack?.durationMs, queueNextTrackFromSummary]);
+
+  // Collect emotion samples while a track is playing; evaluated at song end.
+  useEffect(() => {
+    if (!currentTrack?.uri || !isPlaying) return;
+    const normalizedEmotion = emotion.toLowerCase();
+    emotionCountsRef.current[normalizedEmotion] = (emotionCountsRef.current[normalizedEmotion] || 0) + 1;
+  }, [emotion, currentTrack?.uri, isPlaying]);
+
+  const formatTime = (ms: number) => {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${String(sec).padStart(2, "0")}`;
+  };
 
   const togglePlayPause = () => {
     if (player) {
-      player.togglePlay();
+      void player.togglePlay();
     }
   };
 
@@ -299,7 +525,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4">
         <p className="text-zinc-500 dark:text-zinc-400">
-          Loading music based on your mood...
+          Loading {mode === "relaxation" ? "relaxation" : "focus"} music...
         </p>
       </div>
     );
@@ -307,7 +533,6 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 p-8">
-      {/* Album Art */}
       {currentTrack.albumArt && (
         <img
           src={currentTrack.albumArt}
@@ -316,7 +541,6 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         />
       )}
 
-      {/* Track Info */}
       <div className="text-center">
         <h2 className="text-2xl font-bold text-black dark:text-white">
           {currentTrack.name}
@@ -329,7 +553,25 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
         </p>
       </div>
 
-      {/* Playback Controls */}
+      {/* Progress bar */}
+      {currentTrack.durationMs > 0 && (
+        <div className="w-full max-w-xs space-y-1">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+            <div
+              className="h-full rounded-full bg-green-500"
+              style={{
+                width: `${Math.min((positionMs / currentTrack.durationMs) * 100, 100)}%`,
+                transition: "width 1s linear",
+              }}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>{formatTime(positionMs)}</span>
+            <span>{formatTime(currentTrack.durationMs)}</span>
+          </div>
+        </div>
+      )}
+
       <button
         onClick={togglePlayPause}
         className="flex h-14 w-14 items-center justify-center rounded-full bg-green-500 text-white transition-colors hover:bg-green-600"
@@ -348,6 +590,6 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   );
 });
 
-Player.displayName = 'Player';
+Player.displayName = "Player";
 
 export default Player;

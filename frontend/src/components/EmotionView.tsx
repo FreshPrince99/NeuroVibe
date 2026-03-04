@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Player, { PlayerRef } from './player';
 import EEGVisualization from './EEGVisualization';
 
@@ -27,6 +27,8 @@ interface EmotionViewProps {
   isConnecting?: boolean;
   onConnect?: () => void;
   eegData?: EEGData[];
+  ppgData?: number[];   // raw PPG samples from Muse 2
+  ppgAvailable?: boolean | null;
   onExitToHome?: () => void;
   onBackToHome?: () => void;
   playerRef?: React.RefObject<PlayerRef | null>;
@@ -44,12 +46,24 @@ export default function EmotionView({
   isConnecting = false,
   onConnect,
   eegData = [],
+  ppgData = [],
+  ppgAvailable = null,
   onExitToHome,
   onBackToHome,
   playerRef
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
+  // Only auto-enable Muse prediction on the very first prediction that arrives.
+  // After that, the user's manual toggle must not be overridden.
+  const hasAutoEnabledRef = useRef(false);
+
+  useEffect(() => {
+    if (predictedEmotion && isUsingMusePrediction && !hasAutoEnabledRef.current) {
+      hasAutoEnabledRef.current = true;
+      setUseMusePrediction(true);
+    }
+  }, [predictedEmotion, isUsingMusePrediction]);
 
   const emotions = [
     { name: "happy", color: "bg-yellow-400" },
@@ -78,11 +92,6 @@ export default function EmotionView({
   };
 
   const formatVAD = (value: number) => value.toFixed(2);
-
-  // Update useMusePrediction when new prediction comes in
-  if (predictedEmotion && !useMusePrediction && isUsingMusePrediction) {
-    setUseMusePrediction(true);
-  }
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-50 dark:bg-black">
@@ -258,9 +267,9 @@ export default function EmotionView({
           </div>
         </div>
 
-        {/* Bottom Section - EEG Visualization */}
-        <div className="border-t border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950" style={{ height: '400px' }}>
-          <EEGVisualization eegData={eegData} maxDataPoints={512} />
+        {/* Bottom Section - EEG + PPG Visualization */}
+        <div className="border-t border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950" style={{ height: '460px' }}>
+          <EEGVisualization eegData={eegData} ppgData={ppgData} ppgAvailable={ppgAvailable} maxDataPoints={512} />
         </div>
       </main>
     </div>

@@ -8,11 +8,21 @@ export default function SetupPage() {
   const router = useRouter();
   const [spotifyAuthenticated, setSpotifyAuthenticated] = useState(false);
   const [isClient, setIsClient] = useState(false);
+  const [needsCalibration, setNeedsCalibration] = useState(false);
 
   // Mark when client-side is ready
   useEffect(() => {
     setIsClient(true);
   }, []);
+
+  // Check whether a user profile already exists on the backend
+  useEffect(() => {
+    if (!isClient) return;
+    fetch('http://localhost:5000/user/exists')
+      .then(r => r.json())
+      .then(data => setNeedsCalibration(!data.exists))
+      .catch(() => setNeedsCalibration(true)); // backend not running → assume first-time, show calibration
+  }, [isClient]);
 
   // Check if user returned from Spotify auth
   useEffect(() => {
@@ -58,10 +68,25 @@ export default function SetupPage() {
   };
 
   const handleSetupComplete = () => {
+    // Ensure test mode is never active on a normal setup completion
+    localStorage.removeItem('neurovibe_test_mode');
+    sessionStorage.removeItem('neurovibe_test_mode');
     // Set flag to indicate user just completed setup
     sessionStorage.setItem('neurovibe_just_setup', 'true');
     
     // Navigate to main emotion view
+    router.push('/emotion');
+  };
+
+  const handleTestMode = () => {
+    // Save preferences first (same as handleNext on the last step)
+    const genres = localStorage.getItem('neurovibe_music_genres'); // already set by step nav
+    if (!genres) {
+      localStorage.setItem('neurovibe_music_genres', JSON.stringify([]));
+    }
+    // Mark test mode in sessionStorage only — clears automatically when tab closes
+    sessionStorage.setItem('neurovibe_test_mode', 'true');
+    sessionStorage.setItem('neurovibe_just_setup', 'true');
     router.push('/emotion');
   };
 
@@ -79,6 +104,8 @@ export default function SetupPage() {
       onComplete={handleSetupComplete}
       spotifyAuthenticated={spotifyAuthenticated}
       onBackToHome={handleBackToHome}
+      onTestMode={handleTestMode}
+      needsCalibration={needsCalibration}
     />
   );
 }

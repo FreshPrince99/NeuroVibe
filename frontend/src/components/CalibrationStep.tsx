@@ -15,6 +15,7 @@ interface EEGSample {
 }
 
 type Phase =
+  | 'genre_select'   // pick disliked genres before calibration begins
   | 'instructions'
   | 'connecting'
   | 'baseline'
@@ -25,8 +26,9 @@ type Phase =
   | 'done'
   | 'error';
 
-const BASELINE_SECONDS = 150; // 2.5 minutes
-const SONG_SECONDS     = 30;  // 30-second recording per song
+const BASELINE_SECONDS = 150;  // 2.5 minutes
+const CLIP_SECONDS     = 20;   // 20-second recording per clip
+const N_CLIPS          = 10;   // total calibration clips (6 liked + 4 disliked)
 const WIN_SIZE         = 1024; // samples per window (4 s @ 256 Hz)
 const MIN_BASE_WINDOWS = 5;    // minimum usable baseline windows
 
@@ -107,47 +109,114 @@ const DEFAULT_SONGS: Song[] = [
   { title: 'Come Away with Me', artist: 'Norah Jones',    trackId: '5RCPsfzmEpTXMauTx0B9Y9', emoji: '🌻', mood: 'Warm & Intimate',   energy: 'calm' },
 ];
 
-/** Pick 3 unique songs from the user's preferred genres, sorted by energy preference. */
-function pickSongs(): Song[] {
+// ─────────────────────────────────────────────────────────────────────────────
+// Disliked genre song pool — ensures mixed (like/dislike) calibration labels
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DISLIKE_SONG_POOL: Record<string, Song[]> = {
+  'Heavy metal': [
+    { title: 'Enter Sandman',       artist: 'Metallica',          trackId: '5sICkBXVmaCQk5aISGR3x1', emoji: '🤘', mood: 'Aggressive & Heavy',    energy: 'energetic' },
+    { title: 'Paranoid',            artist: 'Black Sabbath',       trackId: '2Bz3vZWWr0dkmqPGxO9Fze', emoji: '💀', mood: 'Dark & Distorted',       energy: 'energetic' },
+    { title: 'Chop Suey!',          artist: 'System of a Down',    trackId: '0nJW01T7XtvILxQgC5J7Wh', emoji: '🎸', mood: 'Frantic & Intense',      energy: 'energetic' },
+  ],
+  'Opera': [
+    { title: 'Nessun Dorma',        artist: 'Pavarotti',           trackId: '0fNVKHpxQoVGCGBQJeYLMl', emoji: '🎭', mood: 'Grand & Operatic',       energy: 'energetic' },
+    { title: 'O Mio Babbino Caro',  artist: 'Maria Callas',        trackId: '7pMNPGFVXUAVJYliNQSKCz', emoji: '🎤', mood: 'Classical & Dramatic',   energy: 'calm'      },
+  ],
+  'Country': [
+    { title: 'Friends in Low Places', artist: 'Garth Brooks',      trackId: '3vB7Lp1xkEOZBMjFnSK3qG', emoji: '🤠', mood: 'Twangy & Country',       energy: 'energetic' },
+    { title: 'Jolene',               artist: 'Dolly Parton',        trackId: '4uFZsG1vXrPcPnMhKcf7nN', emoji: '🌻', mood: 'Country & Heartfelt',    energy: 'calm'      },
+    { title: 'Take Me Home, Country Roads', artist: 'John Denver',  trackId: '7sOR7gk6XhpGfJoCPHxf1V', emoji: '🛣️', mood: 'Nostalgic & Country',   energy: 'calm'      },
+  ],
+  'EDM': [
+    { title: 'Levels',              artist: 'Avicii',               trackId: '0nk0RDXsP5MZgaFaFcM4K6', emoji: '⚡', mood: 'Festival & Uplifting',   energy: 'energetic' },
+    { title: 'Animals',             artist: 'Martin Garrix',        trackId: '4kFRCxZD8jNqPz51LKhASk', emoji: '🎉', mood: 'Drop & Intense',         energy: 'energetic' },
+    { title: 'Titanium',            artist: 'David Guetta',         trackId: '0d28khcov6AiegSCpG5TuT', emoji: '🔊', mood: 'Loud & Big Room',        energy: 'energetic' },
+  ],
+  'Hip-hop': [
+    { title: 'HUMBLE.',             artist: 'Kendrick Lamar',       trackId: '7KXjTSCq5nL1LoYtL7XAwS', emoji: '🎤', mood: 'Bold & Trap',            energy: 'energetic' },
+    { title: "God's Plan",          artist: 'Drake',                trackId: '6DCZcSspjsKoFjzjrWoCdn', emoji: '🙏', mood: 'Mellow & Urban',         energy: 'calm'      },
+    { title: 'SICKO MODE',          artist: 'Travis Scott',         trackId: '2xLMifQCjDGFmkHkpNLD9h', emoji: '🌙', mood: 'Dark & Trap',            energy: 'energetic' },
+  ],
+  'K-Pop': [
+    { title: 'Dynamite',            artist: 'BTS',                  trackId: '0t1kP63rueHleOhQkYSXFY', emoji: '💜', mood: 'Bubbly & Upbeat',        energy: 'energetic' },
+    { title: 'Kill This Love',      artist: 'BLACKPINK',            trackId: '6nJ0sKV5m1DWQbXCT44aSo', emoji: '🌸', mood: 'Fierce & Pop',           energy: 'energetic' },
+  ],
+};
+
+/** All keys in DISLIKE_SONG_POOL, shown to user in genre_select phase. */
+const DISLIKE_GENRES = Object.keys(DISLIKE_SONG_POOL);
+
+/**
+ * Pick N_CLIPS calibration clips:
+ *  - 6 from the user's liked genres (from localStorage)
+ *  - 4 from the genres the user says they dislike
+ * Shuffled so disliked songs aren't all at the end (avoids order bias).
+ */
+function pickClips(dislikedGenres: string[]): Song[] {
   try {
     const stored  = localStorage.getItem('neurovibe_music_genres');
     const energy  = (localStorage.getItem('neurovibe_focus_energy') ?? 'calm') as 'calm' | 'energetic';
-    const genres: string[] = stored ? JSON.parse(stored) : [];
+    const likedGenres: string[] = stored ? JSON.parse(stored) : [];
 
-    // Gather candidates from all matching genres
-    const candidates: Song[] = [];
-    for (const genre of genres) {
+    // ── Liked clips (target: 6) ──────────────────────────────────────────
+    const likedCandidates: Song[] = [];
+    for (const genre of likedGenres) {
       const pool = SONG_POOL[genre] ?? [];
-      candidates.push(...pool);
+      likedCandidates.push(...pool);
     }
+    const likedPreferred  = likedCandidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
+    const likedOther      = likedCandidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
+    const likedSorted = [...likedPreferred, ...likedOther];
 
-    // Sort so preferred-energy songs come first, shuffle within each energy tier
-    const preferred   = candidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
-    const fallbackEnergy = candidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
-    const sorted = [...preferred, ...fallbackEnergy];
-
-    // De-duplicate by trackId and take first 3
-    const seen = new Set<string>();
-    const picked: Song[] = [];
-    for (const s of sorted) {
-      if (!seen.has(s.trackId) && picked.length < 3) {
-        seen.add(s.trackId);
-        picked.push(s);
+    const seenLiked = new Set<string>();
+    const likedPicked: Song[] = [];
+    for (const s of likedSorted) {
+      if (!seenLiked.has(s.trackId) && likedPicked.length < 6) {
+        seenLiked.add(s.trackId);
+        likedPicked.push(s);
       }
     }
-
-    // Pad with defaults if fewer than 3 candidates
+    // Pad with defaults if needed
     for (const s of DEFAULT_SONGS) {
-      if (picked.length >= 3) break;
-      if (!seen.has(s.trackId)) {
-        seen.add(s.trackId);
-        picked.push(s);
+      if (likedPicked.length >= 6) break;
+      if (!seenLiked.has(s.trackId)) { seenLiked.add(s.trackId); likedPicked.push(s); }
+    }
+
+    // ── Disliked clips (target: 4) ─────────────────────────────────────
+    const dislikedCandidates: Song[] = [];
+    for (const genre of dislikedGenres) {
+      const pool = DISLIKE_SONG_POOL[genre] ?? [];
+      dislikedCandidates.push(...pool);
+    }
+    // Fallback: pick from the first dislike pool entry if none selected
+    if (dislikedCandidates.length === 0) {
+      const fallbackPool = Object.values(DISLIKE_SONG_POOL)[0] ?? [];
+      dislikedCandidates.push(...fallbackPool);
+    }
+    dislikedCandidates.sort(() => Math.random() - 0.5);
+
+    const seenDisliked = new Set<string>(seenLiked); // avoid duplicates with liked
+    const dislikedPicked: Song[] = [];
+    for (const s of dislikedCandidates) {
+      if (!seenDisliked.has(s.trackId) && dislikedPicked.length < 4) {
+        seenDisliked.add(s.trackId);
+        dislikedPicked.push(s);
       }
     }
 
-    return picked;
+    // ── Merge + shuffle (Fisher-Yates) ──────────────────────────────────
+    const all = [...likedPicked, ...dislikedPicked];
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    const result = all.slice(0, N_CLIPS);
+
+    console.log('[CalibrationStep] pickClips:', result.map(s => `${s.title} (${s.artist})`));
+    return result;
   } catch {
-    return DEFAULT_SONGS;
+    return DEFAULT_SONGS.slice(0, N_CLIPS);
   }
 }
 
@@ -201,7 +270,7 @@ interface Props {
 }
 
 export default function CalibrationStep({ onComplete }: Props) {
-  const [phase, setPhase]               = useState<Phase>('instructions');
+  const [phase, setPhase]               = useState<Phase>('genre_select');
   const [songIndex, setSongIndex]       = useState(0);
   const [timer, setTimer]               = useState(0);
   const [isMuseConnected, setIsMuse]    = useState(false);
@@ -210,9 +279,11 @@ export default function CalibrationStep({ onComplete }: Props) {
   const [isSaving, setIsSaving]         = useState(false);
   const [recCount, setRecCount]         = useState(0);      // live sample count during song_playing
   const [dropoutWarning, setDropoutWarning] = useState(false); // BLE silent-stop warning
-  // Songs are picked once at mount based on the user's genre preferences
+  // Songs are picked when the user completes genre_select phase
   const [songs, setSongsState]          = useState<Song[]>([]);
   const [resolvedIds, setResolvedIds]   = useState<string[]>([]);
+  // Genres the user explicitly dislikes — used to ensure mixed labels in calibration
+  const [dislikedGenres, setDislikedGenres] = useState<string[]>([]);
   // Always-current ref so callbacks (doSave, handleVote) never capture a stale songs array
   const songsRef = useRef<Song[]>([]);
 
@@ -221,19 +292,8 @@ export default function CalibrationStep({ onComplete }: Props) {
   const songBufs     = useRef<EEGSample[][]>([[], [], []]);  // one per song (reset after songs load)
   const songLabels   = useRef<number[]>([]);                 // 0=like, 1=dislike
 
-  // Initialize songs + resolvedIds together so they come from the same pickSongs() call
-  // Must run AFTER refs are declared so songBufs can be reset here
-  useEffect(() => {
-    const picked = pickSongs();
-    const storedGenres = localStorage.getItem('neurovibe_music_genres');
-    console.log('[CalibrationStep] Genres in localStorage:', storedGenres);
-    console.log('[CalibrationStep] Picked songs:', picked.map(s => `${s.title} (${s.artist})`));
-    songsRef.current = picked;
-    setSongsState(picked);
-    setResolvedIds(picked.map(s => s.trackId));
-    // Reset EEG recording buffers to match exactly how many songs were picked
-    songBufs.current = picked.map(() => []);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Songs are initialised in the genre_select Continue handler (not at mount)
+  // so we have the user's disliked genre selections before calling pickClips().
 
   const museRef       = useRef<MuseClient | null>(null);
   // Saved after first BLE connect — lets every auto-reconnect bypass the browser device picker
@@ -507,7 +567,7 @@ export default function CalibrationStep({ onComplete }: Props) {
   // ── song intro → song playing ───────────────────────────────────────────
   const startSong = useCallback(() => {
     setPhase('song_playing');
-    setTimer(SONG_SECONDS);
+    setTimer(CLIP_SECONDS);
     setRecCount(0);
     setDropoutWarning(false);
 
@@ -542,6 +602,15 @@ export default function CalibrationStep({ onComplete }: Props) {
       });
     }, 1000);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── song intro: auto-advance to recording after 5 s ─────────────────────
+  // Gives the user time to press play on the Spotify embed before EEG recording begins.
+  // The manual "Start Recording" button still works as an early trigger.
+  useEffect(() => {
+    if (phase !== 'song_intro') return;
+    const t = setTimeout(() => { startSong(); }, 5_000);
+    return () => clearTimeout(t);
+  }, [phase, songIndex, startSong]); // songIndex ensures it re-arms for every new clip
 
   // ── like / dislike vote ─────────────────────────────────────────────────
   const handleVote = useCallback((label: 0 | 1) => {
@@ -652,6 +721,64 @@ export default function CalibrationStep({ onComplete }: Props) {
         </p>
       </div>
 
+      {/* ── Phase: Genre Select ────────────────────────────────────────── */}
+      {phase === 'genre_select' && (
+        <div className="max-w-lg mx-auto space-y-6">
+          <div className="text-center space-y-2">
+            <h3 className="text-2xl font-light text-white">Quick Preference Check</h3>
+            <p className="text-gray-400 font-light text-sm">
+              Select any genres you <strong className="text-red-400">dislike</strong>.
+              We&apos;ll include a few clips from these so the model can learn
+              what your brain looks like when you&apos;re <em>not</em> enjoying music.
+              Pick at least one.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {DISLIKE_GENRES.map(g => (
+              <button
+                key={g}
+                onClick={() =>
+                  setDislikedGenres(prev =>
+                    prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
+                  )
+                }
+                className={`p-3 rounded-xl border-2 text-sm font-light capitalize transition-all ${
+                  dislikedGenres.includes(g)
+                    ? 'border-red-500 bg-red-500/10 text-red-300'
+                    : 'border-gray-700 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                {g}
+              </button>
+            ))}
+          </div>
+          {dislikedGenres.length === 0 && (
+            <p className="text-xs text-yellow-400/70 text-center">
+              ⚠️ Please select at least one genre you dislike to enable accurate calibration.
+            </p>
+          )}
+          <button
+            disabled={dislikedGenres.length === 0}
+            onClick={() => {
+              // Pick clips now that we have the disliked genres
+              const picked = pickClips(dislikedGenres);
+              songsRef.current = picked;
+              setSongsState(picked);
+              setResolvedIds(picked.map(s => s.trackId));
+              songBufs.current = picked.map(() => []);
+              setPhase('instructions');
+            }}
+            className="group flex items-center gap-2 px-8 py-3 mx-auto rounded-full
+                       bg-gradient-to-r from-purple-500 to-blue-600 text-white font-light
+                       tracking-wide hover:shadow-xl hover:shadow-purple-500/30 transition-all
+                       duration-300 transform hover:scale-105 disabled:opacity-40
+                       disabled:pointer-events-none"
+          >
+            <span>Continue →</span>
+          </button>
+        </div>
+      )}
+
       {/* ── Phase: Instructions ─────────────────────────────────────────── */}
       {phase === 'instructions' && (
         <div className="max-w-2xl mx-auto space-y-6">
@@ -670,8 +797,8 @@ export default function CalibrationStep({ onComplete }: Props) {
                 <span className="text-purple-400 font-medium mt-0.5">2.</span>
                 <span>
                   You will listen to{' '}
-                  <strong className="text-white">3 short song clips</strong> (30 s each)
-                  directly in this page using an embedded player.
+                  <strong className="text-white">{N_CLIPS} short clips</strong> (20 s each)
+                  that play back to back. Each clip starts recording automatically.
                 </span>
               </li>
               <li className="flex gap-3">
@@ -768,12 +895,14 @@ export default function CalibrationStep({ onComplete }: Props) {
           {/* ── Song Intro controls ── */}
           {phase === 'song_intro' && (
             <div className="space-y-3">
-              <p className="text-xs text-gray-500">Press play above, then click Ready when you're listening.</p>
+              <p className="text-xs text-gray-500 animate-pulse">
+                ⏳ Recording starts automatically in 5 s — press play in the player above.
+              </p>
               <button
                 onClick={startSong}
                 className="group flex items-center gap-2 px-8 py-3 mx-auto rounded-full bg-white text-black font-light tracking-wide hover:shadow-xl hover:shadow-white/20 transform hover:scale-105 transition-all duration-300"
               >
-                <span>I'm listening — Start timer</span>
+                <span>Start Recording Now</span>
                 <span className="text-sm transition-transform group-hover:translate-x-1">→</span>
               </button>
             </div>
@@ -910,9 +1039,9 @@ export default function CalibrationStep({ onComplete }: Props) {
               onClick={() => {
                 // Stop any running intervals
                 if (recDisplayRef.current) { clearInterval(recDisplayRef.current); recDisplayRef.current = null; }
-                setPhase('instructions');
+                setPhase('genre_select');
                 baselineBuf.current = [];
-                songBufs.current    = [[], [], []];
+                songBufs.current    = songsRef.current.map(() => []);
                 songLabels.current  = [];
                 setSongIndex(0);
                 setErrorMsg('');

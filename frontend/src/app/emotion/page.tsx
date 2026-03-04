@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { MuseClient, zipSamples } from 'muse-js';
 import { io, Socket } from 'socket.io-client';
 import EmotionView from "@/components/EmotionView";
+import CognitiveTrainingView from "@/components/CognitiveTrainingView";
 import { PlayerRef } from "@/components/player";
 
 interface EEGData {
@@ -35,6 +36,7 @@ export default function EmotionPage() {
   const [ppgDataBuffer, setPpgDataBuffer] = useState<number[]>([]);  // for local PPG waveform
   const [likeDislikeData, setLikeDislikeData] = useState<{ label: string; probability: number; confidence: number } | null>(null);
   const [ppgAvailable, setPpgAvailable] = useState<boolean | null>(null);
+  const [sessionMode, setSessionMode] = useState<string>('focus');
   const ppgAvailableRef = useRef<boolean | null>(null);
 
   const clientRef = useRef<MuseClient | null>(null);
@@ -45,6 +47,12 @@ export default function EmotionPage() {
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Stored after first BLE connect — lets auto-reconnect bypass the browser device picker
   const deviceRef = useRef<BluetoothDevice | null>(null);
+
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setSessionMode(localStorage.getItem('neurovibe_mode') || 'focus');
+  }, []);
 
   // Initialize WebSocket connection (skip in test mode — backend is not needed)
   useEffect(() => {
@@ -452,24 +460,40 @@ export default function EmotionPage() {
           </div>
         </div>
       )}
-      <EmotionView
-        predictedEmotion={predictedEmotion}
-        predictedVAD={predictedVAD}
-        isUsingMusePrediction={true}
-        sampleCount={sampleCount}
-        connectionStatus={connectionStatus}
-        onPauseToggle={handlePauseToggle}
-        isPaused={isPaused}
-        needsConnect={needsConnect}
-        isConnecting={isConnecting}
-        onConnect={() => { void handleConnectMuse(); }}
-        eegData={eegDataBuffer}
-        ppgData={ppgDataBuffer}
-        ppgAvailable={ppgAvailable}
-        onExitToHome={handleExitToHome}
-        onBackToHome={handleBackToHome}
-        playerRef={playerRef}
-      />
+      {sessionMode === 'cognitive' ? (
+        <CognitiveTrainingView
+          eegData={eegDataBuffer}
+          ppgData={ppgDataBuffer}
+          predictedVAD={predictedVAD}
+          sampleCount={sampleCount}
+          connectionStatus={connectionStatus}
+          onPauseToggle={handlePauseToggle}
+          isPaused={isPaused}
+          needsConnect={needsConnect}
+          isConnecting={isConnecting}
+          onConnect={() => { void handleConnectMuse(); }}
+          onBackToHome={handleBackToHome}
+        />
+      ) : (
+        <EmotionView
+          predictedEmotion={predictedEmotion}
+          predictedVAD={predictedVAD}
+          isUsingMusePrediction={true}
+          sampleCount={sampleCount}
+          connectionStatus={connectionStatus}
+          onPauseToggle={handlePauseToggle}
+          isPaused={isPaused}
+          needsConnect={needsConnect}
+          isConnecting={isConnecting}
+          onConnect={() => { void handleConnectMuse(); }}
+          eegData={eegDataBuffer}
+          ppgData={ppgDataBuffer}
+          ppgAvailable={ppgAvailable}
+          onExitToHome={handleExitToHome}
+          onBackToHome={handleBackToHome}
+          playerRef={playerRef}
+        />
+      )}
     </div>
   );
 }

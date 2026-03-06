@@ -1,0 +1,177 @@
+Emognition Wearable Dataset 2020 - README
+________________________________________________________________________
+
+
+Experiment design
+43 participants watched 10 short movies (9 emotions + neutral) to invoke physiological reactions. The procedure for a single participant was as follows:
+1. 5-minute baseline measurement (watching dots and lines on a black screen) + self-assessment
+2. Ten iterations of:
+   * 2-min washout (dots and lines)
+   * short movie (1-2 min)
+   * self-assessment
+________________________________________________________________________
+
+
+Self-assessment
+After each movie, participants filled out two questionnaires:
+1. Nine categorical emotions (enthusiasm, liking, sadness, anger, disgust, surprise, fear, amusement, and awe) with a 5-point Likert scale
+2. Three-dimensional SAM (valence, arousal, motivation) on a 9-point Likert scale
+________________________________________________________________________
+
+
+Apparatus
+1. Empatica E4
+2. Samsung Galaxy Watch SM-R810
+3. Muse 2
+4. Samsung Galaxy S20+ 5G to record participant’s upper-body
+5. Samsung Galaxy Tab S6 to run the study application (displaying movies, filling out questionnaires, retrieving signals from Empatica E4)
+
+
+All gathered signals/data are explained below. Brackets contain names of variables in JSON files and signal sampling rate.
+____________________________________
+
+
+Empatica E4
+Signals are explained by the producer at:
+https://support.empatica.com/hc/en-us/sections/200582445-E4-wristband-data
+* blood volume pulse (BVP;  64Hz)
+* interbeat interval (IBI, sampling rate variable)
+* electrodermal activity (EDA; 4Hz)
+* 3-axis accelerometer (ACC - X, Y, Z axes; 32Hz)
+* skin temperature (TEMP; 4Hz)
+____________________________________
+
+
+Samsung Galaxy Watch SM-R810
+Signals were obtained with a custom made Tizen application. The obtained signals are explained in the documentation: https://docs.tizen.org/application/native/guides/location-sensors/device-sensors 
+* heart rate (heartRate; 10Hz - 100ms)
+* Peak-to-peak interval (PPInterval; 10Hz - 100ms)
+* raw blood volume pulse (BVPRaw; 20Hz - 50ms)
+* processed  blood volume pulse (BVPProcessed; 20Hz - 50ms)
+* 3-axis accelerometer (acc - X, Y, Z axes; ~33Hz - 30ms)
+* 3-axis gyroscope (gyr - X, Y, Z axes; ~33Hz - 30ms)
+* 4-axis rotation (rot - X, Y, Z, W axes; ~33Hz - 30ms)
+____________________________________
+
+
+Muse 2
+Signals are explained in Mind-monitor documentation in section CSV Specification: 
+https://mind-monitor.com/FAQ.php
+All signals were gathered with a 256Hz sampling rate.
+* data from AF7 electrode (RAW_AF7, Alpha_AF7, Beta_AF7, Gamma_AF7, Delta_AF7, Theta_AF7, HSI_AF7)
+* data from AF8 electrode (RAW_AF8, Alpha_AF8, Beta_AF8, Gamma_AF8, Delta_AF8, Theta_AF8, HSI_AF8)
+* data from TP9 electrode (RAW_TP9, Alpha_TP9, Beta_TP9, Gamma_TP9, Delta_TP9, Theta_TP9, HSI_TP9)
+* data from TP10 electrode (RAW_TP10, Alpha_TP10, Beta_TP10, Gamma_TP10, Delta_TP10, Theta_TP10, HSI_TP10)
+* 3-axis accelerometer (Accelerometer_X, Accelerometer_Y, Accelerometer_Z)
+* 3-axis gyroscope (Gyro_X, Gyro_Y, Gyro_Z)
+* raw brainwaves for the auxiliary USB sensor (AUX_RIGHT) - not used during the experiment, should not be used
+* value indicating if the headband is on the head (HeadBandOn)
+* timestamp (TimeStamp)
+* battery charge percentage (Battery)
+____________________________________
+
+
+Samsung Galaxy S20+ 5G
+Upper-body video recordings were captured in full HD resolution (1920x1080) and with 60 frames per second. Recordings are available in MP4 format.
+________________________________________________________________________
+
+
+Dataset structure
+Besides MP4 video files with upper-body recordings, three ZIP packages are available:
+* study_data.zip contains physiological signals, self-reports, and control questionnaires;
+* OpenFace.zip contains facial annotations (facial landmarks and action units’ values);
+* Quantum.zip contains emotion labels recognized from facial expressions.
+Within each ZIP package, data are grouped by participants’ ids. The first id is 22. 
+________________________________________________________________________
+
+
+File naming convention
+Signal data:
+{participant_id}_{emotion}_{experiment_stage}_{device}.json
+e.g. 22_FEAR_STIMULUS_MUSE.json
+
+
+Questionnaires and metadata:
+{participant_id}_QUESTIONNAIRES.json
+e.g. 22_QUESTIONNAIRES.json
+
+
+Annotations (OpenFace and Quantum):
+{participant_id}_{emotion}_{experiment_stage}.json/csv
+e.g. 22_FEAR_STIMULUS.json/csv
+
+
+
+
+Possible values:
+participant_id: integers from 22 to 64
+emotion: BASELINE, NEUTRAL, AWE, DISGUST, SURPRISE, ANGER, ENTHUSIASM, LIKING, FEAR, AMUSEMENT, SADNESS
+experiment_stage: WASHOUT, STIMULUS, QUESTIONNAIRES
+device: EMPATICA, SAMSUNG_WATCH, MUSE
+________________________________________________________________________
+
+
+study_data.zip
+{participant_id}_{emotion}_{experiment_stage}_{device}.json
+e.g. 22_FEAR_STIMULUS_MUSE.json
+
+
+Participant’s folder contains signal data and questionnaires data.
+All physiological and questionnaire data are in JSON format. Each file contains a JSON object with signal types and JSON arrays of signal values.
+Because of variable sampling rates of sensors, Empatica E4 and Samsung Galaxy Watch SM-R810 data are tuples of timestamp and signal value.
+Muse 2 files contain a JSON array of timestamps followed by JSON arrays of signal values.
+____________________________________
+
+
+{participant_id}_QUESTIONNAIRES.json
+e.g. 22_QUESTIONNAIRES.json
+
+
+Questionnaire files contain a JSON object with anonymized participant’s metadata and a JSON array of questionnaires filled out during the examination.
+
+
+Metadata include:
+id, age, gender, info about wearing glasses [true/false], time from wake up [hh:mm], time from activity [hh:mm], time from caffeine [hh:mm], time from last cigarette [hh:mm], time from last meal [hh:mm], other drugs in last eight hours [true/false], weekday of the experiment, experiment start date and time, experiment end date and time, a list of movies used in the experiment that have been seen already by the participant, the order of the movies in the experiment.
+
+
+Questionnaire data include:
+consumed stimulus, questionnaire start and end date and time, answers from both self-assessments
+________________________________________________________________________
+
+
+OpenFace.zip
+{participant_id}_{emotion}_{experiment_stage}.csv
+e.g. 22_FEAR_STIMULUS.csv
+
+
+The files contain facial landmark points, eye gaze tracking, and action units’ values obtained by processing upper-body video in its original resolution with OpenFace 2.2.0 toolkit. Output attributes are explained in the toolkit documentation: https://github.com/TadasBaltrusaitis/OpenFace/wiki/Output-Format
+________________________________________________________________________
+
+
+Quantum.zip
+{participant_id}_{emotion}_{experiment_stage}.json
+e.g. 22_FEAR_STIMULUS.json
+
+
+The files contain basic emotions recognized from downscaled (640x360, 60 fps) facial recordings using Quantum Sense software (Quantum CX, Poland). The software outputs the probability that the following emotions occurred in a given frame: anger, disgust, happiness, sadness, surprise, neutral. Additionally, head pose is provided (X, Y, Z, yaw, pitch, roll). Each frame has a timestamp in milliseconds, which corresponds to a time of Quantum Sense processing (not the time of the recording).
+________________________________________________________________________
+
+
+data_completeness.csv
+
+
+This file contains information about missing data/files due to the researcher forgetting to start the recording, device malfunction, or other reasons.
+
+
+For the columns: ‘Empatica E4’, ‘Muse 2’ and ‘Samsung Watch’ a single row corresponds to all phases of the stimulus (washout + movie + self-assessment) or baseline (movie + self-assessment).
+Values in the ‘Muse 2’ column represent the percentage of the time when a headband was on the head according to the sensor, i.e., the HeadBandOn value provided by the device. Value can be from 0 (electrodes not in contact with the head throughout the particular film condition) to 1 (contact over 100% time). Lower values may indicate a low quality or corrupted signal.
+
+
+For the columns: ‘Facial video’, ‘Pose’ and ‘Head pitch’ a single row corresponds only to the stimulus movie phase.
+Values in the ‘Facial video’ column contain the percentage of frames where at least one face was detected, according to data from Quantum Sense software.
+Values in the ‘Pose’ column indicate whether the participant was leaning towards the camera or sitting straight during the majority part of the movie.
+Values in the ‘Head pitch’ column contain the mean pitch angle returned by Quantum Sense software.
+
+
+Furthermore, some rows include notes in the ‘Comments’ column. ‘Skip’ denotes that the participant decided to omit part of the stimulus. ‘Delay’ denotes that the stimulus phase took longer than expected, i.e., the application needed some time to load the questionnaires. Additionally, in each such case, the time of skip/delay is provided. ‘Seen’ denotes that the participant has already seen the movie before the study.
+________________________________________________________________________

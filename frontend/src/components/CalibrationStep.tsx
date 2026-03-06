@@ -27,7 +27,7 @@ type Phase =
   | 'error';
 
 const BASELINE_SECONDS = 150;  // 2.5 minutes
-const CLIP_SECONDS     = 20;   // 20-second recording per clip
+const CLIP_SECONDS     = 45;   // 20-second recording per clip
 const N_CLIPS          = 10;   // total calibration clips (6 liked + 4 disliked)
 const WIN_SIZE         = 1024; // samples per window (4 s @ 256 Hz)
 const MIN_BASE_WINDOWS = 5;    // minimum usable baseline windows
@@ -298,8 +298,10 @@ export default function CalibrationStep({ onComplete }: Props) {
   const museRef       = useRef<MuseClient | null>(null);
   // Saved after first BLE connect — lets every auto-reconnect bypass the browser device picker
   const museDeviceRef = useRef<BluetoothDevice | null>(null);
-  const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const phaseRef     = useRef<Phase>('instructions');
+  const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+  // When true the 45 s countdown is frozen — set on dropout, cleared on reconnect
+  const timerPausedRef    = useRef<boolean>(false);
+  const phaseRef          = useRef<Phase>('instructions');
   // Tracks last EEG sample arrival time (updated on every sample — used by dropout watchdog)
   const lastCalSampleRef  = useRef<number>(0);
   // Interval that refreshes the on-screen sample count + checks for BLE dropout
@@ -339,8 +341,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (nd) museDeviceRef.current = nd;
             await nc.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected (tab focus)');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected (tab focus) — countdown resumed');
             zipSamples(nc.eegReadings).subscribe({
               next: (reading) => {
                 lastCalSampleRef.current = Date.now();
@@ -434,8 +439,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (_newDev) museDeviceRef.current = _newDev;
             await newClient.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected — countdown resumed');
 
             // Re-subscribe with identical logic — buffers + phase are unchanged.
             zipSamples(newClient.eegReadings).subscribe({
@@ -494,8 +502,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (_nd) museDeviceRef.current = _nd;
             await _nc.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected (stream complete) — countdown resumed');
             zipSamples(_nc.eegReadings).subscribe({
               next: (reading) => {
                 lastCalSampleRef.current = Date.now();
@@ -580,11 +591,18 @@ export default function CalibrationStep({ onComplete }: Props) {
       setRecCount(n);
       const msSinceLast = Date.now() - lastCalSampleRef.current;
       if (lastCalSampleRef.current > 0 && msSinceLast > 6_000) {
-        setDropoutWarning(true);
+        // Pause the countdown so lost EEG time is not counted
+        if (!timerPausedRef.current) {
+          timerPausedRef.current = true;
+          setDropoutWarning(true);
+          console.log('[CalibrationStep] EEG dropout — countdown paused');
+        }
       }
     }, 600);
 
     timerRef.current = setInterval(() => {
+      // If disconnected, freeze the countdown until reconnected
+      if (timerPausedRef.current) return;
       setTimer(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current!);
@@ -595,6 +613,7 @@ export default function CalibrationStep({ onComplete }: Props) {
             recDisplayRef.current = null;
           }
           setDropoutWarning(false);
+          timerPausedRef.current = false;
           setPhase('song_vote');
           return 0;
         }
@@ -645,6 +664,7 @@ export default function CalibrationStep({ onComplete }: Props) {
       // Use songsRef.current (always current) — NOT the stale 'songs' closure variable
       const calibrationWindows: EEGSample[][] = [];
       const labels: number[] = [];
+      const clipBoundaries: number[] = [];
       const currentSongs = songsRef.current;
 
       console.log(
@@ -652,14 +672,22 @@ export default function CalibrationStep({ onComplete }: Props) {
         `songBuf sizes = [${songBufs.current.map(b => b.length).join(', ')}]`
       );
 
+      let windowOffset = 0;
       currentSongs.forEach((_, i) => {
         const wins = splitIntoWindows(songBufs.current[i] ?? []);
         const lbl  = songLabels.current[i] ?? 0;
+        clipBoundaries.push(windowOffset);
         wins.forEach(w => {
           calibrationWindows.push(w);
           labels.push(lbl);
         });
+        windowOffset += wins.length;
       });
+
+      console.log(
+        `[CalibrationStep] clip_boundaries = [${clipBoundaries.join(', ')}] ` +
+        `(${clipBoundaries.length} songs, ${calibrationWindows.length} total windows)`
+      );
 
       if (calibrationWindows.length === 0) {
         throw new Error(
@@ -673,6 +701,7 @@ export default function CalibrationStep({ onComplete }: Props) {
         baseline_samples:    baselineWindows,
         calibration_samples: calibrationWindows,
         labels,
+        clip_boundaries:     clipBoundaries,
       };
 
       const resp = await fetch('http://localhost:5000/calibration/build', {
@@ -797,7 +826,7 @@ export default function CalibrationStep({ onComplete }: Props) {
                 <span className="text-purple-400 font-medium mt-0.5">2.</span>
                 <span>
                   You will listen to{' '}
-                  <strong className="text-white">{N_CLIPS} short clips</strong> (20 s each)
+                  <strong className="text-white">{N_CLIPS} short clips</strong> (45 s each)
                   that play back to back. Each clip starts recording automatically.
                 </span>
               </li>
@@ -940,9 +969,9 @@ export default function CalibrationStep({ onComplete }: Props) {
 
               {/* Dropout warning — only shown if stream goes silent */}
               {dropoutWarning && (
-                <div className="bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-xs text-red-300 font-light text-center">
-                  ⚠️ No EEG data received for several seconds. Your headset may have disconnected.
-                  <br />Try adjusting the headset position or restarting calibration.
+                <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-xs text-yellow-300 font-light text-center animate-pulse">
+                  ⏸ Timer paused — headset disconnected. Reconnecting automatically…
+                  <br />Stay still. Recording will resume as soon as the headset reconnects.
                 </div>
               )}
 

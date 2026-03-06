@@ -14,6 +14,7 @@ from likedislike import LikeDislikePredictor, USER_PKL
 import numpy as np
 import os
 import sys
+import pickle
 import argparse
 import threading
 import time
@@ -54,7 +55,29 @@ try:
             label_encoder_path='models/label_encoder.pkl'
         )
     else:  # rule (default)
-        predictor = RuleBasedEmotionPredictor()
+        # Load baseline from user.pkl if it exists so the emotion
+        # classifier starts with personalised thresholds immediately.
+        _rule_baseline = None
+        if os.path.exists(USER_PKL):
+            try:
+                with open(USER_PKL, "rb") as _fh:
+                    _udata = pickle.load(_fh)
+                if isinstance(_udata, dict) and "baseline_for_emotion" in _udata:
+                    _b = np.asarray(_udata["baseline_for_emotion"])  # (4, N)
+                    _rule_baseline = {
+                        "tp9":  _b[0], "af7": _b[1],
+                        "af8":  _b[2], "tp10": _b[3],
+                    }
+                    print(f"[OK] Loaded baseline_for_emotion from user.pkl "
+                          f"(shape={_b.shape}) for personalised emotion thresholds")
+                else:
+                    print("[INFO] user.pkl exists but has no baseline_for_emotion "
+                          "-- emotion classifier will use generic thresholds")
+            except Exception as _e:
+                print(f"[WARN] Could not load user.pkl for emotion baseline: {_e}")
+        else:
+            print("[INFO] No user.pkl found -- emotion classifier using generic thresholds")
+        predictor = RuleBasedEmotionPredictor(baseline_channels=_rule_baseline)
     print(f"✓ {MODEL_TYPE} Predictor ready!")
 except Exception as e:
     print(f"❌ Failed to initialize predictor: {e}")
@@ -483,6 +506,7 @@ def calibration_build():
         baseline_windows    = [_to_array(w) for w in body['baseline_samples']]
         calibration_windows = [_to_array(w) for w in body['calibration_samples']]
         labels              = [int(l) for l in body['labels']]
+        clip_boundaries     = [int(x) for x in body['clip_boundaries']] if 'clip_boundaries' in body else None
 
         if len(calibration_windows) != len(labels):
             return jsonify({'error': 'calibration_samples and labels length mismatch'}), 400
@@ -502,7 +526,8 @@ def calibration_build():
               f"labels={labels}")
 
         user_data = ld_predictor.build_user_profile(
-            baseline_windows, calibration_windows, labels
+            baseline_windows, calibration_windows, labels,
+            clip_boundaries=clip_boundaries,
         )
         print(f"✓ User profile built and saved. "
               f"has_iso={user_data['has_iso']}, "

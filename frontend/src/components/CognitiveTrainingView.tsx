@@ -108,7 +108,11 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
 
   const overallStd = stdDev(window.flatMap((sample) => [sample.tp9, sample.af7, sample.af8, sample.tp10]).map((value) => Math.abs(value)));
   const stability = clamp(1 - overallStd / 250);
-  const engagement = clamp((frontalEnergy + 1) / Math.max(temporalEnergy + frontalEnergy + 2, 1e-6));
+
+  // Frontal engagement: ratio of frontal to total power, stretched from [0.3,1] → [0,1].
+  // The old formula added constants (+1/+2) that swamped small EEG amplitudes — fixed here.
+  const frontalRatio = frontalEnergy / Math.max(frontalEnergy + temporalEnergy, 1e-6);
+  const engagement = clamp((frontalRatio - 0.3) / 0.7);
 
   const arousal = clamp(toFinite(predictedVAD?.arousal, 0.5));
   const valence = clamp(toFinite(predictedVAD?.valence, 0.5));
@@ -119,9 +123,11 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
 
   const ppgWindow = ppgData.slice(-160).map((value) => toFinite(value));
   const ppgDiff = ppgWindow.slice(1).map((value, index) => Math.abs(value - ppgWindow[index]));
-  const ppgRegulation = ppgWindow.length > 20
-    ? clamp(1 - stdDev(ppgDiff) / Math.max(average(ppgDiff) + 8, 1e-6))
-    : 0;
+  // Coefficient of variation: lower CV = smoother pulse = better regulation.
+  // Old formula added +8 to denominator which capped the score unreliably.
+  const ppgMean = average(ppgDiff);
+  const ppgCV = ppgMean > 1e-6 ? stdDev(ppgDiff) / ppgMean : 1;
+  const ppgRegulation = ppgWindow.length > 20 ? clamp(1 - Math.min(ppgCV, 1)) : 0;
 
   return {
     focus,
@@ -133,33 +139,148 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
   };
 }
 
-function RunningVisualization({ selectedActivity, progressValue, metrics }: { selectedActivity: ActivityId; progressValue: number; metrics: ReturnType<typeof calculateBrainMetrics> }) {
+function RunningVisualization({ selectedActivity, progressValue, metrics, ppgData }: {
+  selectedActivity: ActivityId;
+  progressValue: number;
+  metrics: ReturnType<typeof calculateBrainMetrics>;
+  ppgData: number[];
+}) {
   if (selectedActivity === 'neural-ball') {
+    // Colour shifts blue → cyan → green → gold as progress rises
+    const hue = Math.round(200 + progressValue * 40);       // 200→240 blue range
+    const glow = Math.round(progressValue * 80);
+    const rings = [1.6, 1.3, 1.0];
     return (
-      <div className="mx-auto flex h-64 w-64 items-center justify-center rounded-full border border-fuchsia-400/50 bg-fuchsia-500/10" style={{ transform: `scale(${0.7 + progressValue * 0.8})`, transition: 'transform 450ms ease' }}>
-        <span className="text-2xl font-semibold">{Math.round(progressValue * 100)}%</span>
+      <div className="flex flex-col items-center gap-4">
+        <div className="relative flex h-72 w-72 items-center justify-center">
+          {rings.map((scale, i) => (
+            <div
+              key={i}
+              className="absolute rounded-full border border-cyan-400/30"
+              style={{
+                width: `${scale * (0.7 + progressValue * 0.5) * 200}px`,
+                height: `${scale * (0.7 + progressValue * 0.5) * 200}px`,
+                opacity: 0.3 - i * 0.08,
+                transition: 'all 450ms ease',
+              }}
+            />
+          ))}
+          <div
+            className="flex items-center justify-center rounded-full text-2xl font-bold text-white"
+            style={{
+              width: `${(0.7 + progressValue * 0.5) * 200}px`,
+              height: `${(0.7 + progressValue * 0.5) * 200}px`,
+              background: `radial-gradient(circle, hsl(${hue},80%,60%) 0%, hsl(${hue},60%,30%) 100%)`,
+              boxShadow: `0 0 ${glow}px hsl(${hue},80%,60%)`,
+              transition: 'all 450ms ease',
+            }}
+          >
+            {Math.round(progressValue * 100)}%
+          </div>
+        </div>
+        <div className="grid w-full max-w-xs grid-cols-2 gap-2 text-sm">
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Focus<br /><span className="text-lg text-cyan-300">{Math.round(metrics.focus * 100)}%</span></div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Calm<br /><span className="text-lg text-cyan-300">{Math.round(metrics.calm * 100)}%</span></div>
+        </div>
       </div>
     );
   }
 
   if (selectedActivity === 'neuro-drive') {
     const speed = Math.round(progressValue * 180);
-    const laneOffset = (metrics.stability - 0.5) * 80;
+    // Car drifts when stability is LOW (not high — was previously inverted)
+    const drift = (0.5 - metrics.stability) * 120;
+    // Road scroll speed: faster at higher brain speed
+    const scrollDuration = Math.max(700 - speed * 3.5, 80);
+
     return (
-      <div className="mx-auto w-full max-w-4xl rounded-2xl border border-blue-400/40 bg-gradient-to-b from-gray-900 to-black p-6">
-        <div className="relative h-56 overflow-hidden rounded-xl border border-gray-700 bg-gray-950">
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,transparent_48%,rgba(255,255,255,0.2)_50%,transparent_52%)] bg-[length:100%_32px] animate-pulse" />
+      <div className="mx-auto w-full max-w-2xl space-y-4">
+        <style>{`
+          @keyframes road-scroll {
+            from { background-position-y: 0; }
+            to   { background-position-y: 120px; }
+          }
+        `}</style>
+
+        {/* Road viewport */}
+        <div className="relative h-64 overflow-hidden rounded-2xl border border-gray-700 bg-gray-950">
+          {/* Sky gradient */}
+          <div className="absolute inset-0 bg-gradient-to-b from-gray-900 via-gray-950 to-black" />
+
+          {/* Road surface */}
+          <div className="absolute bottom-0 left-[25%] right-[25%] top-[40%] rounded-t-[60%] bg-gray-700/60" />
+
+          {/* Scrolling road dashes */}
           <div
-            className="absolute bottom-4 h-14 w-20 rounded-md bg-blue-500 shadow-[0_0_25px_rgba(59,130,246,0.65)] transition-all duration-300"
-            style={{ left: `calc(50% - 40px + ${laneOffset}px)` }}
+            className="absolute bottom-0 left-1/2 w-3 -translate-x-1/2"
+            style={{
+              top: '40%',
+              backgroundImage: 'repeating-linear-gradient(to bottom, white 0px, white 20px, transparent 20px, transparent 40px)',
+              backgroundSize: '100% 40px',
+              animation: `road-scroll ${scrollDuration}ms linear infinite`,
+              opacity: 0.7,
+            }}
+          />
+
+          {/* Road edge lines */}
+          <div className="absolute bottom-0 top-[40%] w-0.5 bg-yellow-400/70" style={{ left: '26%' }} />
+          <div className="absolute bottom-0 top-[40%] w-0.5 bg-yellow-400/70" style={{ right: '26%' }} />
+
+          {/* Car */}
+          <div
+            className="absolute bottom-6 transition-all duration-300"
+            style={{ left: `calc(50% - 28px + ${drift}px)` }}
           >
-            <div className="mx-auto mt-1 h-2 w-10 rounded-full bg-white/70" />
+            {/* Car body */}
+            <div className="relative h-14 w-14 rounded-t-2xl rounded-b-lg bg-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.6)]">
+              {/* Windscreen */}
+              <div className="absolute inset-x-2 top-1 h-4 rounded-t-xl bg-cyan-200/40" />
+              {/* Wheels */}
+              <div className="absolute -bottom-1.5 -left-2 h-4 w-4 rounded-full bg-gray-800 ring-2 ring-gray-500" />
+              <div className="absolute -bottom-1.5 -right-2 h-4 w-4 rounded-full bg-gray-800 ring-2 ring-gray-500" />
+              {/* Headlights */}
+              <div className="absolute -top-0.5 left-1.5 h-2 w-2 rounded-full bg-yellow-200 shadow-[0_0_6px_white]" />
+              <div className="absolute -top-0.5 right-1.5 h-2 w-2 rounded-full bg-yellow-200 shadow-[0_0_6px_white]" />
+            </div>
           </div>
+
+          {/* Speed HUD */}
+          <div className="absolute right-4 top-4 rounded-xl border border-blue-400/30 bg-black/60 px-4 py-2 text-center">
+            <p className="text-2xl font-bold text-blue-300">{speed}</p>
+            <p className="text-xs text-gray-400">km/h</p>
+          </div>
+
+          {/* Stability warning */}
+          {metrics.stability < 0.35 && (
+            <div className="absolute left-4 top-4 animate-pulse rounded-lg border border-red-500/60 bg-red-500/20 px-3 py-1 text-xs text-red-300">
+              ⚠ Unstable
+            </div>
+          )}
         </div>
-        <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Speed<br /><span className="text-xl text-blue-300">{speed} km/h</span></div>
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Lane Stability<br /><span className="text-xl text-blue-300">{Math.round(metrics.stability * 100)}%</span></div>
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Throttle Control<br /><span className="text-xl text-blue-300">{Math.round(metrics.control * 100)}%</span></div>
+
+        {/* Gauges */}
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div className="rounded-xl border border-gray-700 bg-black/50 p-3">
+            <p className="text-gray-400">Speed</p>
+            <p className="mt-1 text-xl text-blue-300">{speed} km/h</p>
+            <div className="mt-2 h-1.5 rounded-full bg-gray-800">
+              <div className="h-full rounded-full bg-blue-400 transition-all duration-300" style={{ width: `${Math.min(speed / 180 * 100, 100)}%` }} />
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-700 bg-black/50 p-3">
+            <p className="text-gray-400">Stability</p>
+            <p className="mt-1 text-xl text-green-300">{Math.round(metrics.stability * 100)}%</p>
+            <div className="mt-2 h-1.5 rounded-full bg-gray-800">
+              <div className="h-full rounded-full bg-green-400 transition-all duration-300" style={{ width: `${Math.round(metrics.stability * 100)}%` }} />
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-700 bg-black/50 p-3">
+            <p className="text-gray-400">Control</p>
+            <p className="mt-1 text-xl text-purple-300">{Math.round(metrics.control * 100)}%</p>
+            <div className="mt-2 h-1.5 rounded-full bg-gray-800">
+              <div className="h-full rounded-full bg-purple-400 transition-all duration-300" style={{ width: `${Math.round(metrics.control * 100)}%` }} />
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -168,34 +289,126 @@ function RunningVisualization({ selectedActivity, progressValue, metrics }: { se
   if (selectedActivity === 'signal-shield') {
     const shieldOpacity = 0.2 + progressValue * 0.8;
     const shieldScale = 0.8 + metrics.symmetry * 0.35;
+    const shieldColor = progressValue > 0.7 ? '#34d399' : progressValue > 0.4 ? '#60a5fa' : '#f472b6';
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-5 rounded-2xl border border-emerald-400/30 bg-emerald-500/5 p-6">
         <div className="relative flex h-64 w-64 items-center justify-center">
-          <div className="absolute h-60 w-52 rounded-[45%_45%_35%_35%] border-4 border-emerald-300 transition-all duration-300" style={{ transform: `scale(${shieldScale})`, opacity: shieldOpacity }} />
-          <div className="h-44 w-36 rounded-[45%_45%_35%_35%] border-2 border-emerald-100/80 bg-emerald-200/10" />
+          {/* Outer rotating ring only when symmetry is high */}
+          {metrics.symmetry > 0.6 && (
+            <div
+              className="absolute h-72 w-72 rounded-full border border-dashed border-emerald-400/40"
+              style={{ animation: `spin ${3 - metrics.symmetry * 2}s linear infinite` }}
+            />
+          )}
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <div
+            className="absolute transition-all duration-300"
+            style={{ transform: `scale(${shieldScale})`, opacity: shieldOpacity }}
+          >
+            <svg viewBox="0 0 100 120" width="200" height="240">
+              <path
+                d="M50 5 L95 25 L95 65 Q95 95 50 115 Q5 95 5 65 L5 25 Z"
+                fill="none"
+                stroke={shieldColor}
+                strokeWidth="3"
+                filter="url(#glow)"
+              />
+              <defs>
+                <filter id="glow">
+                  <feGaussianBlur stdDeviation="2" result="blur" />
+                  <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+              </defs>
+              <path
+                d="M50 15 L85 30 L85 65 Q85 90 50 107 Q15 90 15 65 L15 30 Z"
+                fill={shieldColor}
+                fillOpacity="0.08"
+                stroke={shieldColor}
+                strokeWidth="1.5"
+                strokeOpacity="0.4"
+              />
+            </svg>
+          </div>
+          <span className="text-3xl font-bold" style={{ color: shieldColor }}>
+            {Math.round(progressValue * 100)}%
+          </span>
         </div>
         <div className="grid w-full grid-cols-2 gap-3 text-sm">
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Shield Strength<br /><span className="text-xl text-emerald-300">{Math.round(progressValue * 100)}%</span></div>
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Frontal Symmetry<br /><span className="text-xl text-emerald-300">{Math.round(metrics.symmetry * 100)}%</span></div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
+            Shield Strength<br />
+            <span className="text-xl text-emerald-300">{Math.round(progressValue * 100)}%</span>
+            <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-emerald-400 transition-all duration-300" style={{ width: `${Math.round(progressValue * 100)}%` }} /></div>
+          </div>
+          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
+            Frontal Symmetry<br />
+            <span className="text-xl text-emerald-300">{Math.round(metrics.symmetry * 100)}%</span>
+            <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-teal-400 transition-all duration-300" style={{ width: `${Math.round(metrics.symmetry * 100)}%` }} /></div>
+          </div>
         </div>
       </div>
     );
   }
 
-  const pulseHeight = 24 + Math.round(progressValue * 72);
+  // ── Pulse Pilot ────────────────────────────────────────────────────────
+  const wavePoints = ppgData.slice(-120);
+  const waveMin  = Math.min(...wavePoints, 0);
+  const waveMax  = Math.max(...wavePoints, 1);
+  const waveRange = Math.max(waveMax - waveMin, 1);
+  const svgH = 160;
+  const svgW = 400;
+  const points = wavePoints.map((v, i) => {
+    const x = (i / Math.max(wavePoints.length - 1, 1)) * svgW;
+    const y = svgH - ((v - waveMin) / waveRange) * (svgH - 16) - 8;
+    return `${x},${y}`;
+  }).join(' ');
+
+  const regulationColor = metrics.ppgRegulation > 0.7 ? '#f87171' : metrics.ppgRegulation > 0.4 ? '#fb923c' : '#94a3b8';
+
   return (
-    <div className="mx-auto w-full max-w-3xl rounded-2xl border border-rose-400/40 bg-rose-500/5 p-6">
-      <div className="relative h-56 overflow-hidden rounded-xl border border-gray-700 bg-black">
-        <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 border-t border-gray-700" />
-        <div
-          className="absolute bottom-1/2 left-0 right-0 mx-6 border-t-4 border-rose-300 transition-all duration-300"
-          style={{ transform: `translateY(${pulseHeight / -2}px)` }}
-        />
+    <div className="mx-auto w-full max-w-3xl space-y-4 rounded-2xl border border-rose-400/40 bg-rose-500/5 p-6">
+      {/* Live PPG waveform */}
+      <div className="relative overflow-hidden rounded-xl border border-gray-700 bg-black">
+        <p className="absolute left-3 top-2 text-xs text-gray-500 uppercase tracking-widest">PPG Waveform</p>
+        {wavePoints.length > 2 ? (
+          <svg viewBox={`0 0 ${svgW} ${svgH}`} className="h-44 w-full" preserveAspectRatio="none">
+            <polyline
+              points={points}
+              fill="none"
+              stroke={regulationColor}
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+            {/* Glow duplicate */}
+            <polyline
+              points={points}
+              fill="none"
+              stroke={regulationColor}
+              strokeWidth="6"
+              strokeLinejoin="round"
+              opacity="0.15"
+            />
+          </svg>
+        ) : (
+          <div className="flex h-44 items-center justify-center text-gray-600 text-sm">Waiting for PPG data…</div>
+        )}
       </div>
-      <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Pulse Smoothness<br /><span className="text-xl text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</span></div>
-        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Calm Drift<br /><span className="text-xl text-rose-300">{Math.round(metrics.calm * 100)}%</span></div>
-        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Neural Control<br /><span className="text-xl text-rose-300">{Math.round(metrics.control * 100)}%</span></div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
+          Pulse Smoothness<br />
+          <span className="text-xl text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</span>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-rose-400 transition-all duration-300" style={{ width: `${Math.round(metrics.ppgRegulation * 100)}%` }} /></div>
+        </div>
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
+          Calm<br />
+          <span className="text-xl text-rose-300">{Math.round(metrics.calm * 100)}%</span>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-pink-400 transition-all duration-300" style={{ width: `${Math.round(metrics.calm * 100)}%` }} /></div>
+        </div>
+        <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
+          Neural Control<br />
+          <span className="text-xl text-rose-300">{Math.round(metrics.control * 100)}%</span>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-orange-400 transition-all duration-300" style={{ width: `${Math.round(metrics.control * 100)}%` }} /></div>
+        </div>
       </div>
     </div>
   );
@@ -388,7 +601,7 @@ export default function CognitiveTrainingView({
               <p className="mt-2 text-sm text-fuchsia-300">{Math.floor(remainingSeconds / 60)}:{String(remainingSeconds % 60).padStart(2, '0')} remaining</p>
             </div>
 
-            <RunningVisualization selectedActivity={selectedActivity} progressValue={progressValue} metrics={metrics} />
+            <RunningVisualization selectedActivity={selectedActivity} progressValue={progressValue} metrics={metrics} ppgData={ppgData} />
 
             <div className="mx-auto grid max-w-3xl grid-cols-2 gap-3 text-sm md:grid-cols-4">
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Focus<br />{Math.round(clamp(metrics.focus) * 100)}%</div>

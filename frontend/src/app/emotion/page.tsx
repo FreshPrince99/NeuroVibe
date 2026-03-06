@@ -492,6 +492,7 @@ export default function EmotionPage() {
           onExitToHome={handleExitToHome}
           onBackToHome={handleBackToHome}
           playerRef={playerRef}
+          likeDislike={likeDislikeData}
         />
       )}
     </div>

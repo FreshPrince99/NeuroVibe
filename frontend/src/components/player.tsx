@@ -13,6 +13,7 @@ interface Track {
 
 interface PlayerProps {
   emotion: string;
+  likeDislike?: { label: string; probability: number; confidence: number } | null;
 }
 
 export interface PlayerRef {
@@ -59,8 +60,23 @@ type SpotifyPlayer = {
 
 const stressEmotions = new Set(["stressed", "sad", "anxious", "angry", "tired"]);
 const positiveEmotions = new Set(["relaxed", "calm", "content", "happy", "neutral"]);
+const tiredRelaxedEmotions = new Set(["relaxed", "calm", "content", "tired", "bored"]);
 
-const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
+// ── Adaptive music constants ──────────────────────────────────────────────
+// Layer 1: per-song energy adaptation
+const ENERGY_STEP             = 0.08;   // shift per song
+const ENERGY_MIN              = 0.15;
+const ENERGY_MAX              = 0.90;
+const STRESS_THRESHOLD        = 0.35;   // stressed% above this → lower energy
+const TIRED_RELAXED_THRESHOLD = 0.35;   // tired/relaxed% above this → raise energy
+// Layer 2: per-block genre rotation
+const GENRE_BLOCK_SIZE = 5;             // evaluate affect every N songs
+const GENRE_EXPLORATION_POOL = [
+  "ambient", "lo-fi", "classical", "nature sounds",
+  "post-rock", "acoustic", "piano", "jazz", "electronic", "cinematic",
+];
+
+const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [player, setPlayer] = useState<SpotifyPlayer | null>(null);
@@ -94,11 +110,13 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
   const accessTokenRef = useRef<string>(accessToken);
   // Refs for emotion and deviceId so callbacks stay stable and never trigger
   // the SDK useEffect to re-run (which would call disconnect).
-  const emotionRef = useRef<string>(emotion);
-  const deviceIdRef = useRef<string>("");
+  const emotionRef     = useRef<string>(emotion);
+  const deviceIdRef    = useRef<string>("");
+  const likeDislikeRef = useRef(likeDislike);
 
   // Keep refs in sync on every render without causing re-renders.
-  emotionRef.current = emotion;
+  emotionRef.current     = emotion;
+  likeDislikeRef.current = likeDislike;
 
   const emotionCountsRef = useRef<Record<string, number>>({});
   const endHandledForTrackRef = useRef<string>("");
@@ -108,6 +126,23 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
   const [positionMs, setPositionMs] = useState(0);
   const positionMsRef = useRef(0);
+
+  // ── Layer 1: adaptive energy (updated per song) ───────────────────────
+  const _baselineEnergy   = focusEnergy === "energetic" ? 0.70 : 0.40;
+  const adaptiveEnergyRef = useRef<number>(_baselineEnergy);
+  const baselineEnergyRef = useRef<number>(_baselineEnergy);
+
+  // ── Layer 2: genre rotation (evaluated every GENRE_BLOCK_SIZE songs) ──
+  const _firstGenre     = preferredGenres.length > 0
+    ? preferredGenres[0]
+    : GENRE_EXPLORATION_POOL[0];
+  const currentGenreRef = useRef<string>(_firstGenre);
+  const genreQueueRef   = useRef<string[]>(
+    [...preferredGenres.slice(1), ...GENRE_EXPLORATION_POOL]
+      .filter((g, i, arr) => g !== _firstGenre && arr.indexOf(g) === i)
+  );
+  const songsPlayedRef  = useRef<number>(0);
+  const blockAffectRef  = useRef<number[]>([]);  // P(dislike) per song in block
 
 
   useImperativeHandle(ref, () => ({
@@ -128,34 +163,28 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     return entries[0][0];
   }, []); // no deps — uses refs only
 
-  const buildTrackQuery = useCallback((dominantEmotion: string) => {
-    const genresText = preferredGenres.length > 0 ? preferredGenres.join(" ") : "instrumental";
+  const buildTrackQuery = useCallback((dominantEmotion: string, energy: number, genre: string) => {
     const normalizedEmotion = dominantEmotion.toLowerCase();
-    // Translate user energy preference into search terms
-    const energyWord = focusEnergy === "energetic" ? "upbeat energetic uptempo" : "calm relaxing slow";
+    // Map continuous energy float [0,1] to search keywords
+    const energyWord = energy >= 0.66 ? "upbeat energetic fast"
+                     : energy >= 0.51 ? "moderate steady focused"
+                     : energy >= 0.31 ? "calm relaxing slow"
+                     : "ambient meditative very slow";
 
     if (mode === "relaxation") {
       if (stressEmotions.has(normalizedEmotion)) {
-        return `calming uplifting ${energyWord} relaxation ${genresText}`;
+        return `calming uplifting relaxation ${energyWord} ${genre}`;
       }
-      if (positiveEmotions.has(normalizedEmotion)) {
-        return `gentle ${energyWord} relaxing ${genresText}`;
-      }
-      return `peaceful anti-stress ${energyWord} ${genresText}`;
+      return `gentle peaceful relaxing ${energyWord} ${genre}`;
     }
 
-    // Focus mode
+    // Focus mode: when stressed always go calming regardless of adaptive energy
     if (stressEmotions.has(normalizedEmotion)) {
-      // When stressed, counter with calming music regardless of energy pref
-      return `calming soothing focus ${genresText}`;
+      return `calming soothing focus ${genre}`;
     }
 
-    if (focusEnergy === "energetic") {
-      return `energetic upbeat high-energy deep focus ${genresText}`;
-    }
-
-    return `calm slow relaxing deep focus ${genresText}`;
-  }, [focusEnergy, mode, preferredGenres]);
+    return `deep focus ${energyWord} ${genre}`;
+  }, [mode]);
 
   const fetchAudioFeatures = useCallback(async (ids: string[]) => {
     if (ids.length === 0) return { features: {}, meta: {} };
@@ -204,7 +233,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     const popularity = meta?.popularity ?? 50;
     const normalizedEmotion = dominantEmotion.toLowerCase();
 
-    let targetEnergy = focusEnergy === "energetic" ? 0.75 : 0.35;
+    let targetEnergy = adaptiveEnergyRef.current;
     if (mode === "relaxation") targetEnergy = 0.25;
     if (stressEmotions.has(normalizedEmotion)) targetEnergy = 0.20;
 
@@ -215,15 +244,19 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
     const danceScore = mode === "relaxation" ? (1 - danceability) : danceability;
     const popScore = Math.min(Math.max(popularity / 100, 0), 1);
     return energyScore + 0.3 * valenceScore + 0.15 * danceScore + 0.05 * popScore;
-  }, [focusEnergy, mode]);
+  }, [mode]);
 
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
     const token = accessTokenRef.current;
     const device = deviceIdRef.current;
     if (!device || !token) return false;
 
-    const query = buildTrackQuery(dominantEmotion);
-    console.log(`🎵 Searching Spotify | mode=${mode} energy=${focusEnergy} genres=[${preferredGenres.join(", ")}] query="${query}"`);
+    const query = buildTrackQuery(
+      dominantEmotion,
+      adaptiveEnergyRef.current,
+      currentGenreRef.current,
+    );
+    console.log(`🎵 Searching Spotify | mode=${mode} energy=${adaptiveEnergyRef.current.toFixed(2)} genre="${currentGenreRef.current}" query="${query}"`);
     const searchQuery = encodeURIComponent(query);
 
     const searchResponse = await fetch(
@@ -275,24 +308,80 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion }, ref) => {
 
     emotionCountsRef.current = {};
     return true;
-  // deviceId and accessToken are read from refs \u2014 intentionally excluded from deps.
+  // deviceId, accessToken, adaptive refs read via refs — intentionally excluded from deps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buildTrackQuery, focusEnergy, mode, preferredGenres]);
+  }, [buildTrackQuery, mode, scoreTrack, fetchAudioFeatures]);
 
   const queueNextTrackFromSummary = useCallback(async (trackUri: string) => {
     if (!trackUri || endHandledForTrackRef.current === trackUri) return;
-
-    // Mark as handled IMMEDIATELY to prevent duplicate calls from timer + SDK event.
-    // Without this, a failed search would leave the ref unset, causing infinite retries
-    // of the same failing query — making the song appear stuck/repeating.
     endHandledForTrackRef.current = trackUri;
+
+    // ── Layer 1: adjust adaptive energy from this song's emotion proportions ──
+    const counts = emotionCountsRef.current;
+    const total  = Object.values(counts).reduce((s, n) => s + n, 0);
+    if (total > 0) {
+      const tiredRelaxedCount = Object.entries(counts)
+        .filter(([k]) => tiredRelaxedEmotions.has(k))
+        .reduce((s, [, n]) => s + n, 0);
+      const stressedCount = Object.entries(counts)
+        .filter(([k]) => k === "stressed" || k === "anxious" || k === "angry")
+        .reduce((s, [, n]) => s + n, 0);
+
+      const tiredRelaxedRatio = tiredRelaxedCount / total;
+      const stressedRatio     = stressedCount     / total;
+
+      let energy = adaptiveEnergyRef.current;
+      if (stressedRatio > STRESS_THRESHOLD) {
+        energy -= ENERGY_STEP;
+        console.log(`⚡ Layer 1: stressed=${(stressedRatio * 100).toFixed(0)}% → lower energy`);
+      } else if (tiredRelaxedRatio > TIRED_RELAXED_THRESHOLD) {
+        energy += ENERGY_STEP;
+        console.log(`⚡ Layer 1: tired/relaxed=${(tiredRelaxedRatio * 100).toFixed(0)}% → raise energy`);
+      } else {
+        // Gently nudge back toward the user's baseline preference
+        energy += (baselineEnergyRef.current - energy) * 0.25;
+      }
+      adaptiveEnergyRef.current = Math.min(ENERGY_MAX, Math.max(ENERGY_MIN, energy));
+      console.log(`⚡ Layer 1: adaptive energy → ${adaptiveEnergyRef.current.toFixed(2)}`);
+    }
+
+    // ── Layer 2: track genre affect, rotate every GENRE_BLOCK_SIZE songs ──
+    const latestProb = likeDislikeRef.current?.probability ?? null;
+    if (latestProb !== null) blockAffectRef.current.push(latestProb);
+    songsPlayedRef.current += 1;
+
+    if (
+      songsPlayedRef.current % GENRE_BLOCK_SIZE === 0 &&
+      blockAffectRef.current.length > 0
+    ) {
+      const avgProb =
+        blockAffectRef.current.reduce((s, p) => s + p, 0) /
+        blockAffectRef.current.length;
+      blockAffectRef.current = [];
+
+      if (avgProb >= 0.5) {
+        // Majority dislikes → try next genre
+        const next = genreQueueRef.current.shift();
+        if (next) {
+          console.log(
+            `🎼 Layer 2: avgDislikeProb=${avgProb.toFixed(2)} — negative affect` +
+            ` → switching genre "${currentGenreRef.current}" → "${next}"`
+          );
+          genreQueueRef.current.push(currentGenreRef.current); // cycle old to back
+          currentGenreRef.current = next;
+        }
+      } else {
+        console.log(
+          `🎼 Layer 2: avgDislikeProb=${avgProb.toFixed(2)} — positive affect` +
+          ` → keeping genre "${currentGenreRef.current}"`
+        );
+      }
+    }
 
     const dominantEmotion = getDominantEmotion();
     const started = await playTrackForEmotionSummary(dominantEmotion);
     if (!started) {
       console.warn("[Player] Failed to start next track — will retry on next emotion update.");
-      // Reset after a delay so a future emotion change can trigger a retry
-      // with a potentially different search query (different dominant emotion).
       setTimeout(() => {
         if (endHandledForTrackRef.current === trackUri) {
           endHandledForTrackRef.current = "";

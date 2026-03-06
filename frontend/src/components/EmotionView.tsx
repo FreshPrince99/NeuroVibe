@@ -32,6 +32,7 @@ interface EmotionViewProps {
   onExitToHome?: () => void;
   onBackToHome?: () => void;
   playerRef?: React.RefObject<PlayerRef | null>;
+  likeDislike?: { label: string; probability: number; confidence: number } | null;
 }
 
 export default function EmotionView({ 
@@ -50,7 +51,8 @@ export default function EmotionView({
   ppgAvailable = null,
   onExitToHome,
   onBackToHome,
-  playerRef
+  playerRef,
+  likeDislike,
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
@@ -263,7 +265,7 @@ export default function EmotionView({
 
           {/* Right Side - Spotify Player */}
           <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
-            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} />
+            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} likeDislike={likeDislike} />
           </div>
         </div>
 

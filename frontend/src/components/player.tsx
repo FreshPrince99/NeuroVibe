@@ -124,8 +124,16 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
   const trackEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasStartedPlaybackRef = useRef(false);
 
+  // Keep a rolling history of recently played URIs so the same song is never
+  // immediately re-selected. Capped at 15 entries.
+  const playedUrisRef = useRef<string[]>([]);
+
   const [positionMs, setPositionMs] = useState(0);
   const positionMsRef = useRef(0);
+
+  // Genre shift notification — shown briefly in the UI when genre rotates.
+  const [genreShift, setGenreShift] = useState<{ from: string; to: string } | null>(null);
+  const genreShiftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Layer 1: adaptive energy (updated per song) ───────────────────────
   const _baselineEnergy   = focusEnergy === "energetic" ? 0.70 : 0.40;
@@ -246,6 +254,18 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
     return energyScore + 0.3 * valenceScore + 0.15 * danceScore + 0.05 * popScore;
   }, [mode]);
 
+  // Disable Spotify's repeat mode on the active device so tracks don't loop.
+  const disableRepeat = useCallback(async (device: string) => {
+    const token = accessTokenRef.current;
+    if (!token || !device) return;
+    try {
+      await fetch(
+        `https://api.spotify.com/v1/me/player/repeat?state=off&device_id=${device}`,
+        { method: "PUT", headers: { Authorization: `Bearer ${token}` } },
+      );
+    } catch { /* non-fatal */ }
+  }, []);
+
   const playTrackForEmotionSummary = useCallback(async (dominantEmotion: string): Promise<boolean> => {
     const token = accessTokenRef.current;
     const device = deviceIdRef.current;
@@ -256,11 +276,13 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
       adaptiveEnergyRef.current,
       currentGenreRef.current,
     );
-    console.log(`🎵 Searching Spotify | mode=${mode} energy=${adaptiveEnergyRef.current.toFixed(2)} genre="${currentGenreRef.current}" query="${query}"`);
+    // Randomise the search offset so we don't always get the same 20 results.
+    const offset = Math.floor(Math.random() * 3) * 20; // 0, 20, or 40
+    console.log(`Searching Spotify | mode=${mode} energy=${adaptiveEnergyRef.current.toFixed(2)} genre="${currentGenreRef.current}" offset=${offset} query="${query}"`);
     const searchQuery = encodeURIComponent(query);
 
     const searchResponse = await fetch(
-      `https://api.spotify.com/v1/search?q=${searchQuery}&type=track&limit=20&market=US`,
+      `https://api.spotify.com/v1/search?q=${searchQuery}&type=track&limit=50&offset=${offset}&market=US`,
       {
         headers: { Authorization: `Bearer ${token}` },
       }
@@ -272,25 +294,45 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
     }
 
     const searchData = await searchResponse.json();
+    // Filter out: local tracks AND recently played URIs so we never repeat.
+    const recentlyPlayed = new Set(playedUrisRef.current);
     const tracks: SpotifyTrack[] = (searchData.tracks?.items || []).filter(
-      (track: SpotifyTrack) => track?.uri && !track?.is_local
+      (track: SpotifyTrack) =>
+        track?.uri && !track?.is_local && !recentlyPlayed.has(track.uri)
     );
 
-    if (tracks.length === 0) return false;
+    // If everything is filtered out (e.g. tiny genre pool), relax the history filter
+    // and just exclude the single currently playing track.
+    const fallbackTracks: SpotifyTrack[] = tracks.length === 0
+      ? (searchData.tracks?.items || []).filter(
+          (track: SpotifyTrack) =>
+            track?.uri && !track?.is_local && track.uri !== activeTrackUriRef.current
+        )
+      : tracks;
 
-    const ids = tracks
+    if (fallbackTracks.length === 0) {
+      console.warn("[Player] No new tracks found — clearing history and retrying.");
+      playedUrisRef.current = [];
+      return false;
+    }
+
+    const ids = fallbackTracks
       .map(t => t.uri?.split(":").pop())
       .filter((id): id is string => Boolean(id))
       .slice(0, 50);
 
     const { features: featuresMap, meta: metaMap } = await fetchAudioFeatures(ids);
-    const scored = tracks.map(t => {
+    const scored = fallbackTracks.map(t => {
       const id = t.uri?.split(":").pop() ?? "";
       const score = scoreTrack(dominantEmotion, featuresMap[id], metaMap[id]);
       return { track: t, score };
     });
     scored.sort((a, b) => b.score - a.score);
-    const chosenTrack = scored[0]?.track ?? tracks[Math.floor(Math.random() * tracks.length)];
+
+    // Pick randomly from the top-5 candidates to avoid always playing the same song.
+    const topN = scored.slice(0, Math.min(5, scored.length));
+    const chosenTrack = topN[Math.floor(Math.random() * topN.length)]?.track
+      ?? fallbackTracks[Math.floor(Math.random() * fallbackTracks.length)];
 
     const playResponse = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device}`, {
       method: "PUT",
@@ -305,6 +347,10 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
       console.warn("Spotify play failed:", playResponse.status);
       return false;
     }
+
+    // Record this URI in the history (cap at 15) so it won't be chosen next time.
+    playedUrisRef.current.push(chosenTrack.uri);
+    if (playedUrisRef.current.length > 15) playedUrisRef.current.shift();
 
     emotionCountsRef.current = {};
     return true;
@@ -346,34 +392,60 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
     }
 
     // ── Layer 2: track genre affect, rotate every GENRE_BLOCK_SIZE songs ──
-    const latestProb = likeDislikeRef.current?.probability ?? null;
-    if (latestProb !== null) blockAffectRef.current.push(latestProb);
+    // Use the label ("like"/"dislike") rather than the raw probability.
+    // The isotonic calibrator can collapse all probabilities to a single value
+    // (e.g. 0.475) making a numeric threshold useless. The label is the actual
+    // classification decision and is always binary.
+    const latestLD = likeDislikeRef.current;
+    if (latestLD != null) {
+      const dislikeScore = latestLD.label === "dislike" ? 1.0 : 0.0;
+      blockAffectRef.current.push(dislikeScore);
+      console.log(
+        `[Layer 2] song ${songsPlayedRef.current + 1}: label=${latestLD.label}` +
+        ` prob=${latestLD.probability.toFixed(3)} → score=${dislikeScore}` +
+        ` (block ${blockAffectRef.current.length}/${GENRE_BLOCK_SIZE})`
+      );
+    } else {
+      console.log(`[Layer 2] song ${songsPlayedRef.current + 1}: no likeDislike signal — skipping`);
+    }
     songsPlayedRef.current += 1;
 
     if (
       songsPlayedRef.current % GENRE_BLOCK_SIZE === 0 &&
       blockAffectRef.current.length > 0
     ) {
-      const avgProb =
+      const avgScore =
         blockAffectRef.current.reduce((s, p) => s + p, 0) /
         blockAffectRef.current.length;
       blockAffectRef.current = [];
 
-      if (avgProb >= 0.5) {
-        // Majority dislikes → try next genre
+      console.log(
+        `[Layer 2] block complete (${songsPlayedRef.current} songs):` +
+        ` avgDislikeScore=${avgScore.toFixed(2)} genre="${currentGenreRef.current}"`
+      );
+
+      if (avgScore >= 0.5) {
+        // Majority of block was disliked → rotate genre
         const next = genreQueueRef.current.shift();
         if (next) {
-          console.log(
-            `🎼 Layer 2: avgDislikeProb=${avgProb.toFixed(2)} — negative affect` +
-            ` → switching genre "${currentGenreRef.current}" → "${next}"`
-          );
-          genreQueueRef.current.push(currentGenreRef.current); // cycle old to back
+          const prev = currentGenreRef.current;
+          genreQueueRef.current.push(prev); // cycle old genre to back of queue
           currentGenreRef.current = next;
+          console.log(
+            `[Layer 2] GENRE SHIFT: "${prev}" → "${next}"` +
+            ` (avgDislikeScore=${avgScore.toFixed(2)}, ${Math.round(avgScore * GENRE_BLOCK_SIZE)}/${GENRE_BLOCK_SIZE} dislikes)`
+          );
+          // Show notification in the UI for 5 seconds
+          if (genreShiftTimerRef.current) clearTimeout(genreShiftTimerRef.current);
+          setGenreShift({ from: prev, to: next });
+          genreShiftTimerRef.current = setTimeout(() => setGenreShift(null), 5000);
+        } else {
+          console.log(`[Layer 2] genre queue exhausted — staying on "${currentGenreRef.current}"`);
         }
       } else {
         console.log(
-          `🎼 Layer 2: avgDislikeProb=${avgProb.toFixed(2)} — positive affect` +
-          ` → keeping genre "${currentGenreRef.current}"`
+          `[Layer 2] keeping genre "${currentGenreRef.current}"` +
+          ` (avgDislikeScore=${avgScore.toFixed(2)}, positive affect)`
         );
       }
     }
@@ -452,6 +524,8 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
         const typedState = state as { device_id: string };
         deviceIdRef.current = typedState.device_id;
         setDeviceId(typedState.device_id);
+        // Ensure Spotify never loops a track on its own.
+        void disableRepeat(typedState.device_id);
       });
 
       sp.addListener("player_state_changed", (state: unknown) => {
@@ -622,6 +696,16 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 p-8">
+      {/* Genre shift toast notification */}
+      {genreShift && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-xl bg-zinc-800/90 px-4 py-2.5 text-sm text-white shadow-lg backdrop-blur-sm border border-zinc-600 animate-fade-in">
+          <span className="text-zinc-400">Genre shift:</span>
+          <span className="font-medium text-zinc-300 line-through">{genreShift.from}</span>
+          <span className="text-zinc-500">→</span>
+          <span className="font-semibold text-green-400">{genreShift.to}</span>
+        </div>
+      )}
+
       {currentTrack.albumArt && (
         <img
           src={currentTrack.albumArt}

@@ -18,6 +18,7 @@ import argparse
 import threading
 import time
 from collections import Counter
+from typing import Optional
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='EEG Emotion Prediction WebSocket Server')
@@ -58,6 +59,9 @@ try:
 except Exception as e:
     print(f"❌ Failed to initialize predictor: {e}")
     sys.exit(1)
+
+# Global baseline channels (populated during calibration) for personalising rule-based emotion predictor
+baseline_channels_global: Optional[dict] = None
 
 # Initialize Like/Dislike predictor (non-fatal if models are missing)
 print("Initializing Like/Dislike Predictor...")
@@ -194,7 +198,8 @@ def handle_eeg_sample(data):
 
         # Log progress every 256 samples (1 second)
         if len(eeg_buffer) % 256 == 0:
-            print(f"📊 Received {len(eeg_buffer)}/{BUFFER_SIZE} samples ({len(eeg_buffer)/SAMPLE_RATE:.1f}s)")
+            # print(f"📊 Received {len(eeg_buffer)}/{BUFFER_SIZE} samples ({len(eeg_buffer)/SAMPLE_RATE:.1f}s)")
+            print()
         
         # Once we have enough samples, make a prediction
         if len(eeg_buffer) >= BUFFER_SIZE and not is_processing:
@@ -503,6 +508,29 @@ def calibration_build():
               f"has_iso={user_data['has_iso']}, "
               f"n_cal={user_data['n_cal_windows']}, "
               f"label_counts={user_data.get('label_counts')}")
+        
+        # If using rule-based emotion predictor, personalise it with baseline data
+        global predictor, baseline_channels_global
+        if isinstance(predictor, RuleBasedEmotionPredictor) and len(baseline_windows) > 0:
+            try:
+                # Concatenate all baseline windows and extract channel structure
+                # Each baseline_window is (4, 1024), so concatenate along axis 1
+                baseline_eeg_concat = np.concatenate(baseline_windows, axis=1)
+                baseline_channels = {
+                    'tp9':  baseline_eeg_concat[0],
+                    'af7':  baseline_eeg_concat[1],
+                    'af8':  baseline_eeg_concat[2],
+                    'tp10': baseline_eeg_concat[3],
+                }
+                baseline_channels_global = baseline_channels
+                
+                # Reinitialize emotion predictor with baseline
+                predictor = RuleBasedEmotionPredictor(baseline_channels=baseline_channels)
+                print(f"[OK] Rule-based emotion predictor personalised with {len(baseline_windows)} baseline windows")
+            except Exception as e:
+                print(f"⚠️  Failed to personalise emotion predictor with baseline: {e}")
+                # Fall back to generic thresholds (predictor already initialized)
+        
         return jsonify({
             'success':          True,
             'n_cal_windows':    user_data['n_cal_windows'],

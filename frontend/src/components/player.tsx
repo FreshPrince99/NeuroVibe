@@ -14,10 +14,12 @@ interface Track {
 interface PlayerProps {
   emotion: string;
   likeDislike?: { label: string; probability: number; confidence: number } | null;
+  onTrackChange?: (track: { name: string; artist: string; uri: string; genre: string } | null) => void;
 }
 
 export interface PlayerRef {
   pause: () => void;
+  getCurrentTrack: () => { name: string; artist: string; uri: string; genre: string } | null;
 }
 
 type SessionMode = "focus" | "relaxation" | "cognitive";
@@ -76,7 +78,7 @@ const GENRE_EXPLORATION_POOL = [
   "post-rock", "acoustic", "piano", "jazz", "electronic", "cinematic",
 ];
 
-const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref) => {
+const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTrackChange }, ref) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [player, setPlayer] = useState<SpotifyPlayer | null>(null);
@@ -154,6 +156,10 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
 
 
   useImperativeHandle(ref, () => ({
+    getCurrentTrack: () => {
+      if (!currentTrack) return null;
+      return { name: currentTrack.name, artist: currentTrack.artist, uri: currentTrack.uri, genre: currentGenreRef.current };
+    },
     pause: () => {
       if (player && isPlaying) {
         void player.pause();
@@ -542,6 +548,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike }, ref
             clearTimeout(trackEndTimerRef.current);
             trackEndTimerRef.current = null;
           }
+          onTrackChange?.({ name: track.name, artist: track.artists.map((a: SpotifyArtist) => a.name).join(", "), uri: track.uri, genre: currentGenreRef.current });
         }
 
         setCurrentTrack({

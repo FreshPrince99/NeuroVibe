@@ -216,14 +216,14 @@ class RuleBasedEmotionPredictor:
     """
 
     # How many recent predictions to use for majority-vote smoothing
-    HISTORY_WINDOW: int = 3
+    HISTORY_WINDOW: int = 5
 
     # Buffer size that the server should accumulate before calling predict_emotion
     required_samples: int = REQUIRED_SAMPLES
 
     def __init__(
         self,
-        history_window: int = 3,
+        history_window: int = 5,
         baseline_channels: Optional[dict] = None,
     ) -> None:
         """
@@ -305,18 +305,26 @@ class RuleBasedEmotionPredictor:
         rt_base = theta_baseline / total
         rg_base = gamma_baseline / total
         
-        # Personalised thresholds: baseline + offset (tuned empirically)
+        # Personalised thresholds: set ABOVE the baseline rest values so a
+        # genuine state change is required to score highly.
+        #
+        # alpha: relaxed scores when alpha exceeds rest by ~50%.
+        #        Using 1.5× ensures the threshold isn't trivially reached
+        #        at rest while still being reachable during genuine relaxation.
+        # beta:  focus/stress score when beta is 30% above resting beta.
+        # theta: tired scores when theta is 40% above resting theta.
+        # FAA:   stress/calm require FAA to exceed baseline magnitude by 0.5
+        #        (a meaningful directional shift, not random EEG noise).
         self._thresholds = {
-            # Relative band power: baseline + small positive offset (user needs to exceed baseline to trigger)
-            "alpha_threshold":         max(0.06, ra_base * 1.2),         # 20% above baseline, min 6%
-            "beta_threshold":          max(0.08, rb_base * 1.3),         # 30% above baseline, min 8%
-            "theta_threshold":         max(0.25, rt_base * 1.4),         # 40% above baseline, min 25%
-            "gamma_threshold":         max(0.02, rg_base * 1.5),         # 50% above baseline, min 2%
-            "theta_alpha_ratio":       thr_baseline + 0.5,               # baseline + 0.5
-            "beta_alpha_ratio":        bar_baseline + 0.3,               # baseline + 0.3
-            # FAA: symmetric around baseline (±20% of baseline magnitude)
-            "faa_stress":              max(0.3, abs(faa_baseline) + 0.5), # rightward shift for stress
-            "faa_calm":               -max(0.3, abs(faa_baseline) + 0.5), # leftward shift for calm
+            "alpha_threshold":         max(0.06, ra_base + ra_base * 0.50),  # 50% above baseline
+            "beta_threshold":          max(0.08, rb_base + rb_base * 0.30),  # 30% above baseline
+            "theta_threshold":         max(0.25, rt_base + rt_base * 0.40),  # 40% above baseline
+            "gamma_threshold":         max(0.02, rg_base + rg_base * 0.50),  # 50% above baseline
+            "theta_alpha_ratio":       thr_baseline + 0.5,
+            "beta_alpha_ratio":        bar_baseline + 0.3,
+            # FAA thresholds: symmetric, require a real directional shift
+            "faa_stress":              max(0.3, abs(faa_baseline) + 0.5),
+            "faa_calm":               -max(0.3, abs(faa_baseline) + 0.5),
             # Heart rate / HRV: use generic (PPG not typically recorded during baseline)
             "hr_very_high":           110.0,
             "hr_high":                 90.0,
@@ -363,37 +371,42 @@ class RuleBasedEmotionPredictor:
         rg = gamma / total     # relative gamma
 
         # ── FOCUS ─────────────────────────────────────────────────────────
-        # Evidence for: elevated beta (>threshold %), high beta/alpha, low theta/alpha
-        sc["focus"] += 0.32 * min(rb / t["beta_threshold"], 1.0)
+        # Evidence for: elevated beta, high beta/alpha, low theta/alpha,
+        # and BALANCED FAA (neither left nor right — frontal symmetry)
+        # KEY differentiator from stress: focus has |FAA| near zero
+        sc["focus"] += 0.28 * min(rb / t["beta_threshold"], 1.0)
         sc["focus"] += 0.22 * min(bar / t["beta_alpha_ratio"], 1.0)
-        sc["focus"] += 0.20 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 2.0, 2.0))
+        sc["focus"] += 0.18 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 2.0, 2.0))
         sc["focus"] += 0.12 * min(rg / t["gamma_threshold"], 1.0)
-        sc["focus"] += 0.14 * max(0.0, 1.0 - abs(faa) / 1.2)
+        # Frontal balance: score drops off as FAA magnitude grows
+        sc["focus"] += 0.20 * max(0.0, 1.0 - abs(faa) / max(t["faa_stress"], 0.5))
 
         # ── STRESS ────────────────────────────────────────────────────────
-        # Evidence for: elevated beta, alpha suppression, positive FAA
-        sc["stress"] += 0.32 * min(rb / t["beta_threshold"], 1.0)
-        sc["stress"] += 0.28 * min(max(faa, 0.0) / max(t["faa_stress"], 0.5), 1.0)
+        # Evidence for: elevated beta, alpha SUPPRESSION, POSITIVE FAA
+        # (right-frontal dominance = withdrawal affect = stress/anxiety)
+        # KEY differentiator from focus: requires positive FAA
+        sc["stress"] += 0.22 * min(rb / t["beta_threshold"], 1.0)
+        sc["stress"] += 0.38 * min(max(faa, 0.0) / max(t["faa_stress"], 0.5), 1.0)
         sc["stress"] += 0.28 * max(0.0, 1.0 - ra / t["alpha_threshold"])
         sc["stress"] += 0.12 * min(bar / (t["beta_alpha_ratio"] + 0.8), 1.0)
 
         # ── RELAXED ───────────────────────────────────────────────────────
-        # Evidence for: elevated alpha, low beta, negative FAA
-        sc["relaxed"] += 0.36 * min(ra / t["alpha_threshold"], 1.0)
-        sc["relaxed"] += 0.28 * min(max(-faa, 0.0) / max(abs(t["faa_calm"]), 0.5), 1.0)
-        sc["relaxed"] += 0.18 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 1.5, 2.0))
-        sc["relaxed"] += 0.10 * max(0.0, 1.0 - rb / t["beta_threshold"])
+        # Evidence for: elevated alpha, low beta, NEGATIVE FAA
+        # (left-frontal dominance = approach affect = positive/calm)
+        sc["relaxed"] += 0.35 * min(ra / t["alpha_threshold"], 1.0)
+        sc["relaxed"] += 0.30 * min(max(-faa, 0.0) / max(abs(t["faa_calm"]), 0.5), 1.0)
+        sc["relaxed"] += 0.15 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 1.5, 2.0))
+        sc["relaxed"] += 0.12 * max(0.0, 1.0 - rb / t["beta_threshold"])
         sc["relaxed"] += 0.08 * max(0.0, 1.0 - rt / t["theta_threshold"])
 
         # ── TIRED ─────────────────────────────────────────────────────────
-        # Gate by low beta (not activated) and low alpha (suppressed)
-        fatigue_gate = max(0.0, 1.0 - min(rb / max(t["beta_threshold"], 0.08), 1.0))
-        alpha_supp_gate = max(0.0, 1.0 - min(ra / max(t["alpha_threshold"], 0.10), 1.0))
-        tired_gate = fatigue_gate * alpha_supp_gate
-        
-        sc["tired"] += 0.45 * min(thr / max(t["theta_alpha_ratio"], 2.0), 1.0) * tired_gate
-        sc["tired"] += 0.35 * min(rt / max(t["theta_threshold"], 0.25), 1.0) * tired_gate
-        sc["tired"] += 0.20 * max(0.0, 1.0 - ra / (t["alpha_threshold"] * 0.65))
+        # Evidence for: high theta, high theta/alpha ratio, low beta.
+        # Additive scoring — no multiplicative gate that collapses to ~0.
+        # A drowsy-but-awake state has moderate beta and still fires theta.
+        sc["tired"] += 0.40 * min(thr / max(t["theta_alpha_ratio"], 2.0), 1.0)
+        sc["tired"] += 0.35 * min(rt  / max(t["theta_threshold"],   0.25), 1.0)
+        sc["tired"] += 0.15 * max(0.0, 1.0 - rb / t["beta_threshold"])
+        sc["tired"] += 0.10 * max(0.0, 1.0 - ra / t["alpha_threshold"])
 
         # ── PPG / cardiovascular adjustments ──────────────────────────────
         if ppg.available and ppg.bpm is not None and ppg.rmssd is not None:

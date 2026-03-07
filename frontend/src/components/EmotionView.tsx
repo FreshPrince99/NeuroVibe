@@ -1,7 +1,8 @@
 'use client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import Player, { PlayerRef } from './player';
 import EEGVisualization from './EEGVisualization';
+import { pushSongRecord } from '@/lib/sessionStore';
 
 interface EEGData {
   tp9: number;
@@ -30,8 +31,7 @@ interface EmotionViewProps {
   ppgData?: number[];   // raw PPG samples from Muse 2
   ppgAvailable?: boolean | null;
   onExitToHome?: () => void;
-  onBackToHome?: () => void;
-  playerRef?: React.RefObject<PlayerRef | null>;
+  onBackToHome?: () => void;  onStopSession?: () => void;  playerRef?: React.RefObject<PlayerRef | null>;
   likeDislike?: { label: string; probability: number; confidence: number } | null;
 }
 
@@ -51,14 +51,74 @@ export default function EmotionView({
   ppgAvailable = null,
   onExitToHome,
   onBackToHome,
+  onStopSession,
   playerRef,
   likeDislike,
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
-  // Only auto-enable Muse prediction on the very first prediction that arrives.
-  // After that, the user's manual toggle must not be overridden.
   const hasAutoEnabledRef = useRef(false);
+
+  // ── Per-song tracking for session results ────────────────────────────
+  const songEmotionsRef = useRef<string[]>([]);
+  const songValencesRef = useRef<number[]>([]);
+  const songStartTimeRef = useRef<number>(Date.now());
+  const currentSongRef = useRef<{ name: string; artist: string; uri: string; genre: string } | null>(null);
+  const lastLikeDislikeRef = useRef<string | undefined>(undefined);
+
+  // Collect emotions while a song is playing
+  useEffect(() => {
+    if (!predictedEmotion) return;
+    songEmotionsRef.current.push(predictedEmotion.toLowerCase());
+  }, [predictedEmotion]);
+
+  // Collect valence
+  useEffect(() => {
+    if (predictedVAD?.valence != null) {
+      songValencesRef.current.push(predictedVAD.valence);
+    }
+  }, [predictedVAD]);
+
+  // Track latest like/dislike for current song
+  useEffect(() => {
+    if (likeDislike) lastLikeDislikeRef.current = likeDislike.label;
+  }, [likeDislike]);
+
+  const flushCurrentSong = useCallback(() => {
+    if (!currentSongRef.current) return;
+    const listeningSeconds = (Date.now() - songStartTimeRef.current) / 1000;
+    const vals = songValencesRef.current;
+    const avgValence = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0.5;
+    pushSongRecord({
+      name: currentSongRef.current.name,
+      artist: currentSongRef.current.artist,
+      genre: currentSongRef.current.genre,
+      uri: currentSongRef.current.uri,
+      emotions: [...songEmotionsRef.current],
+      avgValence,
+      listeningSeconds,
+      likeDislikeLabel: lastLikeDislikeRef.current,
+    });
+  }, []);
+
+  const handleTrackChange = useCallback((track: { name: string; artist: string; uri: string; genre: string } | null) => {
+    // Flush previous song before switching
+    flushCurrentSong();
+    // Reset trackers for new song
+    currentSongRef.current = track;
+    songEmotionsRef.current = [];
+    songValencesRef.current = [];
+    songStartTimeRef.current = Date.now();
+    lastLikeDislikeRef.current = undefined;
+  }, [flushCurrentSong]);
+
+  const handleStopSession = useCallback(() => {
+    // Save partial current song if it was playing long enough
+    const elapsed = (Date.now() - songStartTimeRef.current) / 1000;
+    if (elapsed > 10) flushCurrentSong();
+    playerRef?.current?.pause();
+    onStopSession?.();
+  }, [flushCurrentSong, onStopSession, playerRef]);
 
   useEffect(() => {
     if (predictedEmotion && isUsingMusePrediction && !hasAutoEnabledRef.current) {
@@ -124,6 +184,12 @@ export default function EmotionView({
               }`}
             >
               {isPaused ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              onClick={handleStopSession}
+              className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-semibold hover:bg-red-700 transition-colors"
+            >
+              Stop Session
             </button>
           </div>
         </div>
@@ -265,7 +331,7 @@ export default function EmotionView({
 
           {/* Right Side - Spotify Player */}
           <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
-            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} likeDislike={likeDislike} />
+            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} likeDislike={likeDislike} onTrackChange={handleTrackChange} />
           </div>
         </div>
 

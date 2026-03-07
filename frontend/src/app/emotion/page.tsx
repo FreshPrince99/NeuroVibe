@@ -7,6 +7,7 @@ import { io, Socket } from 'socket.io-client';
 import EmotionView from "@/components/EmotionView";
 import CognitiveTrainingView from "@/components/CognitiveTrainingView";
 import { PlayerRef } from "@/components/player";
+import { initSession, finaliseSession, addEEGSnapshot } from "@/lib/sessionStore";
 
 interface EEGData {
   tp9: number;
@@ -51,8 +52,30 @@ export default function EmotionPage() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    setSessionMode(localStorage.getItem('neurovibe_mode') || 'focus');
+    const mode = (localStorage.getItem('neurovibe_mode') || 'focus') as 'focus' | 'relaxation' | 'cognitive';
+    setSessionMode(mode);
+    initSession(mode);
   }, []);
+
+  // Record EEG snapshots for the results page (music modes: use VAD as proxy)
+  const vadRef = useRef(predictedVAD);
+  useEffect(() => { vadRef.current = predictedVAD; }, [predictedVAD]);
+  useEffect(() => {
+    if (sessionMode === 'cognitive') return; // CognitiveTrainingView handles its own snapshots
+    const id = setInterval(() => {
+      const vad = vadRef.current;
+      const focus  = vad ? Math.min(1, Math.max(0, vad.arousal))  : 0.5;
+      const calm   = vad ? Math.min(1, Math.max(0, 1 - vad.arousal * 0.6 + vad.valence * 0.4)) : 0.5;
+      const control = vad ? Math.min(1, Math.max(0, vad.dominance)) : 0.5;
+      addEEGSnapshot({ focus, calm, control, symmetry: control, ppg: focus });
+    }, 5000);
+    return () => clearInterval(id);
+  }, [sessionMode]);
+
+  const handleStopSession = () => {
+    finaliseSession();
+    router.push('/results');
+  };
 
   // Initialize WebSocket connection (skip in test mode — backend is not needed)
   useEffect(() => {
@@ -473,6 +496,7 @@ export default function EmotionPage() {
           isConnecting={isConnecting}
           onConnect={() => { void handleConnectMuse(); }}
           onBackToHome={handleBackToHome}
+          onStopSession={handleStopSession}
         />
       ) : (
         <EmotionView
@@ -491,6 +515,7 @@ export default function EmotionPage() {
           ppgAvailable={ppgAvailable}
           onExitToHome={handleExitToHome}
           onBackToHome={handleBackToHome}
+          onStopSession={handleStopSession}
           playerRef={playerRef}
           likeDislike={likeDislikeData}
         />

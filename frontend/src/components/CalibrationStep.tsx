@@ -144,43 +144,40 @@ const DISLIKE_SONG_POOL: Record<string, Song[]> = {
   ],
 };
 
+/** All keys in SONG_POOL, shown to user for liked genre selection. */
+const LIKED_GENRES = Object.keys(SONG_POOL);
+
 /** All keys in DISLIKE_SONG_POOL, shown to user in genre_select phase. */
 const DISLIKE_GENRES = Object.keys(DISLIKE_SONG_POOL);
 
 /**
  * Pick N_CLIPS calibration clips:
- *  - 6 from the user's liked genres (from localStorage)
+ *  - 4 from the user's explicitly liked genres
  *  - 4 from the genres the user says they dislike
+ *  - 2 random wildcard songs from DEFAULT_SONGS (for variety)
  * Shuffled so disliked songs aren't all at the end (avoids order bias).
  */
-function pickClips(dislikedGenres: string[]): Song[] {
+function pickClips(likedGenres: string[], dislikedGenres: string[]): Song[] {
   try {
-    const stored  = localStorage.getItem('neurovibe_music_genres');
-    const energy  = (localStorage.getItem('neurovibe_focus_energy') ?? 'calm') as 'calm' | 'energetic';
-    const likedGenres: string[] = stored ? JSON.parse(stored) : [];
+    const energy = (localStorage.getItem('neurovibe_focus_energy') ?? 'calm') as 'calm' | 'energetic';
 
-    // ── Liked clips (target: 6) ──────────────────────────────────────────
+    // ── Liked clips (target: 4) ──────────────────────────────────────────
     const likedCandidates: Song[] = [];
     for (const genre of likedGenres) {
       const pool = SONG_POOL[genre] ?? [];
       likedCandidates.push(...pool);
     }
-    const likedPreferred  = likedCandidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
-    const likedOther      = likedCandidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
-    const likedSorted = [...likedPreferred, ...likedOther];
+    const likedPreferred = likedCandidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
+    const likedOther     = likedCandidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
+    const likedSorted    = [...likedPreferred, ...likedOther];
 
-    const seenLiked = new Set<string>();
+    const seen = new Set<string>();
     const likedPicked: Song[] = [];
     for (const s of likedSorted) {
-      if (!seenLiked.has(s.trackId) && likedPicked.length < 6) {
-        seenLiked.add(s.trackId);
+      if (!seen.has(s.trackId) && likedPicked.length < 4) {
+        seen.add(s.trackId);
         likedPicked.push(s);
       }
-    }
-    // Pad with defaults if needed
-    for (const s of DEFAULT_SONGS) {
-      if (likedPicked.length >= 6) break;
-      if (!seenLiked.has(s.trackId)) { seenLiked.add(s.trackId); likedPicked.push(s); }
     }
 
     // ── Disliked clips (target: 4) ─────────────────────────────────────
@@ -189,24 +186,31 @@ function pickClips(dislikedGenres: string[]): Song[] {
       const pool = DISLIKE_SONG_POOL[genre] ?? [];
       dislikedCandidates.push(...pool);
     }
-    // Fallback: pick from the first dislike pool entry if none selected
     if (dislikedCandidates.length === 0) {
       const fallbackPool = Object.values(DISLIKE_SONG_POOL)[0] ?? [];
       dislikedCandidates.push(...fallbackPool);
     }
     dislikedCandidates.sort(() => Math.random() - 0.5);
 
-    const seenDisliked = new Set<string>(seenLiked); // avoid duplicates with liked
     const dislikedPicked: Song[] = [];
     for (const s of dislikedCandidates) {
-      if (!seenDisliked.has(s.trackId) && dislikedPicked.length < 4) {
-        seenDisliked.add(s.trackId);
+      if (!seen.has(s.trackId) && dislikedPicked.length < 4) {
+        seen.add(s.trackId);
         dislikedPicked.push(s);
       }
     }
 
+    // ── Wildcard clips (target: 2) — from DEFAULT_SONGS for variety ──────
+    const wildcardPicked: Song[] = [];
+    for (const s of DEFAULT_SONGS.sort(() => Math.random() - 0.5)) {
+      if (!seen.has(s.trackId) && wildcardPicked.length < 2) {
+        seen.add(s.trackId);
+        wildcardPicked.push(s);
+      }
+    }
+
     // ── Merge + shuffle (Fisher-Yates) ──────────────────────────────────
-    const all = [...likedPicked, ...dislikedPicked];
+    const all = [...likedPicked, ...dislikedPicked, ...wildcardPicked];
     for (let i = all.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [all[i], all[j]] = [all[j], all[i]];
@@ -282,7 +286,8 @@ export default function CalibrationStep({ onComplete }: Props) {
   // Songs are picked when the user completes genre_select phase
   const [songs, setSongsState]          = useState<Song[]>([]);
   const [resolvedIds, setResolvedIds]   = useState<string[]>([]);
-  // Genres the user explicitly dislikes — used to ensure mixed labels in calibration
+  // Genres the user explicitly likes/dislikes — used to ensure mixed labels in calibration
+  const [likedGenres, setLikedGenres]       = useState<string[]>([]);
   const [dislikedGenres, setDislikedGenres] = useState<string[]>([]);
   // Always-current ref so callbacks (doSave, handleVote) never capture a stale songs array
   const songsRef = useRef<Song[]>([]);
@@ -752,45 +757,74 @@ export default function CalibrationStep({ onComplete }: Props) {
 
       {/* ── Phase: Genre Select ────────────────────────────────────────── */}
       {phase === 'genre_select' && (
-        <div className="max-w-lg mx-auto space-y-6">
+        <div className="max-w-xl mx-auto space-y-8">
           <div className="text-center space-y-2">
             <h3 className="text-2xl font-light text-white">Quick Preference Check</h3>
             <p className="text-gray-400 font-light text-sm">
-              Select any genres you <strong className="text-red-400">dislike</strong>.
-              We&apos;ll include a few clips from these so the model can learn
-              what your brain looks like when you&apos;re <em>not</em> enjoying music.
-              Pick at least one.
+              Select at least one genre you <strong className="text-green-400">like</strong> and
+              one you <strong className="text-red-400">dislike</strong>. We&apos;ll build a
+              calibration playlist that contrasts your brain&apos;s response to both.
             </p>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {DISLIKE_GENRES.map(g => (
-              <button
-                key={g}
-                onClick={() =>
-                  setDislikedGenres(prev =>
-                    prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
-                  )
-                }
-                className={`p-3 rounded-xl border-2 text-sm font-light capitalize transition-all ${
-                  dislikedGenres.includes(g)
-                    ? 'border-red-500 bg-red-500/10 text-red-300'
-                    : 'border-gray-700 text-gray-400 hover:border-gray-500'
-                }`}
-              >
-                {g}
-              </button>
-            ))}
+
+          {/* Liked genres */}
+          <div className="space-y-3">
+            <p className="text-sm font-light text-green-400 uppercase tracking-widest">✓ Genres I like</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {LIKED_GENRES.map(g => (
+                <button
+                  key={g}
+                  onClick={() =>
+                    setLikedGenres(prev =>
+                      prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
+                    )
+                  }
+                  className={`p-2.5 rounded-xl border-2 text-xs font-light capitalize transition-all ${
+                    likedGenres.includes(g)
+                      ? 'border-green-500 bg-green-500/10 text-green-300'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-500'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
           </div>
-          {dislikedGenres.length === 0 && (
+
+          {/* Disliked genres */}
+          <div className="space-y-3">
+            <p className="text-sm font-light text-red-400 uppercase tracking-widest">✕ Genres I dislike</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {DISLIKE_GENRES.map(g => (
+                <button
+                  key={g}
+                  onClick={() =>
+                    setDislikedGenres(prev =>
+                      prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
+                    )
+                  }
+                  className={`p-2.5 rounded-xl border-2 text-xs font-light capitalize transition-all ${
+                    dislikedGenres.includes(g)
+                      ? 'border-red-500 bg-red-500/10 text-red-300'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-500'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(likedGenres.length === 0 || dislikedGenres.length === 0) && (
             <p className="text-xs text-yellow-400/70 text-center">
-              ⚠️ Please select at least one genre you dislike to enable accurate calibration.
+              ⚠️ Please select at least one liked genre and one disliked genre.
             </p>
           )}
+
           <button
-            disabled={dislikedGenres.length === 0}
+            disabled={likedGenres.length === 0 || dislikedGenres.length === 0}
             onClick={() => {
-              // Pick clips now that we have the disliked genres
-              const picked = pickClips(dislikedGenres);
+              const picked = pickClips(likedGenres, dislikedGenres);
               songsRef.current = picked;
               setSongsState(picked);
               setResolvedIds(picked.map(s => s.trackId));
@@ -1076,6 +1110,8 @@ export default function CalibrationStep({ onComplete }: Props) {
                 setErrorMsg('');
                 setRecCount(0);
                 setDropoutWarning(false);
+                setLikedGenres([]);
+                setDislikedGenres([]);
               }}
               className="px-6 py-2 rounded-full border border-gray-700 text-gray-400 hover:border-gray-500 text-sm font-light transition-colors"
             >

@@ -103,7 +103,7 @@ export default function SetupGuide({
     if (currentStep === 2) return preferredGenres.length > 0 && focusEnergy !== '';
     if (currentStep === PAIR_STEP) return true;
     if (currentStep === CAL_STEP) return false;  // CalibrationStep drives its own advance
-    if (currentStep === MODE_STEP) return selectedMode === 'focus' || selectedMode === 'relaxation';
+    if (currentStep === MODE_STEP) return selectedMode === 'focus' || selectedMode === 'relaxation' || selectedMode === 'cognitive';
     return false;
   };
 
@@ -378,16 +378,22 @@ export default function SetupGuide({
                     </p>
                   </button>
 
-                  <div className="p-6 rounded-2xl border border-gray-800 bg-gray-900/30 opacity-70">
+                  <button
+                    onClick={() => setSelectedMode('cognitive')}
+                    className={`p-6 rounded-2xl border text-left transition-colors ${
+                      selectedMode === 'cognitive'
+                        ? 'bg-fuchsia-500/20 border-fuchsia-400'
+                        : 'bg-gray-900/50 border-gray-800 hover:border-gray-600'
+                    }`}
+                  >
                     <div className="flex items-center gap-3 mb-3">
-                      <span className="text-lg text-gray-400">✨</span>
-                      <h3 className="text-lg font-medium text-gray-300">Improve Cognitive Power</h3>
+                      <span className="text-lg text-fuchsia-300">⚡</span>
+                      <h3 className="text-lg font-medium text-white">Improve Cognitive Power</h3>
                     </div>
-                    <p className="text-sm text-gray-400 leading-relaxed mb-4">
-                      Planned mode for boosting memory, problem solving, and sustained cognitive performance.
+                    <p className="text-sm text-gray-300 leading-relaxed">
+                      Train focus, calm control, reaction stability, and physiological regulation with EEG + PPG guided exercises.
                     </p>
-                    <span className="inline-block text-xs px-3 py-1 rounded-full bg-gray-800 text-gray-400 border border-gray-700">Coming soon</span>
-                  </div>
+                  </button>
                 </div>
               </div>
             )}
@@ -419,7 +425,7 @@ export default function SetupGuide({
                   : 'bg-white text-black hover:shadow-xl hover:shadow-white/20 transform hover:scale-105'
               }`}
             >
-              <span>{currentStep === totalSteps ? 'Start Listening' : 'Next'}</span>
+              <span>{currentStep === totalSteps ? 'Start Session' : 'Next'}</span>
               <span className="text-sm transition-transform group-hover:translate-x-1">→</span>
             </button>
           </div>

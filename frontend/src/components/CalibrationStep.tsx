@@ -27,7 +27,7 @@ type Phase =
   | 'error';
 
 const BASELINE_SECONDS = 150;  // 2.5 minutes
-const CLIP_SECONDS     = 20;   // 20-second recording per clip
+const CLIP_SECONDS     = 45;   // 20-second recording per clip
 const N_CLIPS          = 10;   // total calibration clips (6 liked + 4 disliked)
 const WIN_SIZE         = 1024; // samples per window (4 s @ 256 Hz)
 const MIN_BASE_WINDOWS = 5;    // minimum usable baseline windows
@@ -144,43 +144,40 @@ const DISLIKE_SONG_POOL: Record<string, Song[]> = {
   ],
 };
 
+/** All keys in SONG_POOL, shown to user for liked genre selection. */
+const LIKED_GENRES = Object.keys(SONG_POOL);
+
 /** All keys in DISLIKE_SONG_POOL, shown to user in genre_select phase. */
 const DISLIKE_GENRES = Object.keys(DISLIKE_SONG_POOL);
 
 /**
  * Pick N_CLIPS calibration clips:
- *  - 6 from the user's liked genres (from localStorage)
+ *  - 4 from the user's explicitly liked genres
  *  - 4 from the genres the user says they dislike
+ *  - 2 random wildcard songs from DEFAULT_SONGS (for variety)
  * Shuffled so disliked songs aren't all at the end (avoids order bias).
  */
-function pickClips(dislikedGenres: string[]): Song[] {
+function pickClips(likedGenres: string[], dislikedGenres: string[]): Song[] {
   try {
-    const stored  = localStorage.getItem('neurovibe_music_genres');
-    const energy  = (localStorage.getItem('neurovibe_focus_energy') ?? 'calm') as 'calm' | 'energetic';
-    const likedGenres: string[] = stored ? JSON.parse(stored) : [];
+    const energy = (localStorage.getItem('neurovibe_focus_energy') ?? 'calm') as 'calm' | 'energetic';
 
-    // ── Liked clips (target: 6) ──────────────────────────────────────────
+    // ── Liked clips (target: 4) ──────────────────────────────────────────
     const likedCandidates: Song[] = [];
     for (const genre of likedGenres) {
       const pool = SONG_POOL[genre] ?? [];
       likedCandidates.push(...pool);
     }
-    const likedPreferred  = likedCandidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
-    const likedOther      = likedCandidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
-    const likedSorted = [...likedPreferred, ...likedOther];
+    const likedPreferred = likedCandidates.filter(s => s.energy === energy).sort(() => Math.random() - 0.5);
+    const likedOther     = likedCandidates.filter(s => s.energy !== energy).sort(() => Math.random() - 0.5);
+    const likedSorted    = [...likedPreferred, ...likedOther];
 
-    const seenLiked = new Set<string>();
+    const seen = new Set<string>();
     const likedPicked: Song[] = [];
     for (const s of likedSorted) {
-      if (!seenLiked.has(s.trackId) && likedPicked.length < 6) {
-        seenLiked.add(s.trackId);
+      if (!seen.has(s.trackId) && likedPicked.length < 4) {
+        seen.add(s.trackId);
         likedPicked.push(s);
       }
-    }
-    // Pad with defaults if needed
-    for (const s of DEFAULT_SONGS) {
-      if (likedPicked.length >= 6) break;
-      if (!seenLiked.has(s.trackId)) { seenLiked.add(s.trackId); likedPicked.push(s); }
     }
 
     // ── Disliked clips (target: 4) ─────────────────────────────────────
@@ -189,24 +186,31 @@ function pickClips(dislikedGenres: string[]): Song[] {
       const pool = DISLIKE_SONG_POOL[genre] ?? [];
       dislikedCandidates.push(...pool);
     }
-    // Fallback: pick from the first dislike pool entry if none selected
     if (dislikedCandidates.length === 0) {
       const fallbackPool = Object.values(DISLIKE_SONG_POOL)[0] ?? [];
       dislikedCandidates.push(...fallbackPool);
     }
     dislikedCandidates.sort(() => Math.random() - 0.5);
 
-    const seenDisliked = new Set<string>(seenLiked); // avoid duplicates with liked
     const dislikedPicked: Song[] = [];
     for (const s of dislikedCandidates) {
-      if (!seenDisliked.has(s.trackId) && dislikedPicked.length < 4) {
-        seenDisliked.add(s.trackId);
+      if (!seen.has(s.trackId) && dislikedPicked.length < 4) {
+        seen.add(s.trackId);
         dislikedPicked.push(s);
       }
     }
 
+    // ── Wildcard clips (target: 2) — from DEFAULT_SONGS for variety ──────
+    const wildcardPicked: Song[] = [];
+    for (const s of DEFAULT_SONGS.sort(() => Math.random() - 0.5)) {
+      if (!seen.has(s.trackId) && wildcardPicked.length < 2) {
+        seen.add(s.trackId);
+        wildcardPicked.push(s);
+      }
+    }
+
     // ── Merge + shuffle (Fisher-Yates) ──────────────────────────────────
-    const all = [...likedPicked, ...dislikedPicked];
+    const all = [...likedPicked, ...dislikedPicked, ...wildcardPicked];
     for (let i = all.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [all[i], all[j]] = [all[j], all[i]];
@@ -282,7 +286,8 @@ export default function CalibrationStep({ onComplete }: Props) {
   // Songs are picked when the user completes genre_select phase
   const [songs, setSongsState]          = useState<Song[]>([]);
   const [resolvedIds, setResolvedIds]   = useState<string[]>([]);
-  // Genres the user explicitly dislikes — used to ensure mixed labels in calibration
+  // Genres the user explicitly likes/dislikes — used to ensure mixed labels in calibration
+  const [likedGenres, setLikedGenres]       = useState<string[]>([]);
   const [dislikedGenres, setDislikedGenres] = useState<string[]>([]);
   // Always-current ref so callbacks (doSave, handleVote) never capture a stale songs array
   const songsRef = useRef<Song[]>([]);
@@ -298,8 +303,10 @@ export default function CalibrationStep({ onComplete }: Props) {
   const museRef       = useRef<MuseClient | null>(null);
   // Saved after first BLE connect — lets every auto-reconnect bypass the browser device picker
   const museDeviceRef = useRef<BluetoothDevice | null>(null);
-  const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const phaseRef     = useRef<Phase>('instructions');
+  const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+  // When true the 45 s countdown is frozen — set on dropout, cleared on reconnect
+  const timerPausedRef    = useRef<boolean>(false);
+  const phaseRef          = useRef<Phase>('instructions');
   // Tracks last EEG sample arrival time (updated on every sample — used by dropout watchdog)
   const lastCalSampleRef  = useRef<number>(0);
   // Interval that refreshes the on-screen sample count + checks for BLE dropout
@@ -339,8 +346,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (nd) museDeviceRef.current = nd;
             await nc.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected (tab focus)');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected (tab focus) — countdown resumed');
             zipSamples(nc.eegReadings).subscribe({
               next: (reading) => {
                 lastCalSampleRef.current = Date.now();
@@ -434,8 +444,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (_newDev) museDeviceRef.current = _newDev;
             await newClient.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected — countdown resumed');
 
             // Re-subscribe with identical logic — buffers + phase are unchanged.
             zipSamples(newClient.eegReadings).subscribe({
@@ -494,8 +507,11 @@ export default function CalibrationStep({ onComplete }: Props) {
             if (_nd) museDeviceRef.current = _nd;
             await _nc.start();
             lastCalSampleRef.current = Date.now();
+            timerPausedRef.current = false;
+            setDropoutWarning(false);
             setIsMuse(true);
-            setStatusMsg('✓ Muse reconnected');
+            setStatusMsg('✓ Muse reconnected — recording resumed');
+            console.log('[CalibrationStep] Reconnected (stream complete) — countdown resumed');
             zipSamples(_nc.eegReadings).subscribe({
               next: (reading) => {
                 lastCalSampleRef.current = Date.now();
@@ -580,11 +596,18 @@ export default function CalibrationStep({ onComplete }: Props) {
       setRecCount(n);
       const msSinceLast = Date.now() - lastCalSampleRef.current;
       if (lastCalSampleRef.current > 0 && msSinceLast > 6_000) {
-        setDropoutWarning(true);
+        // Pause the countdown so lost EEG time is not counted
+        if (!timerPausedRef.current) {
+          timerPausedRef.current = true;
+          setDropoutWarning(true);
+          console.log('[CalibrationStep] EEG dropout — countdown paused');
+        }
       }
     }, 600);
 
     timerRef.current = setInterval(() => {
+      // If disconnected, freeze the countdown until reconnected
+      if (timerPausedRef.current) return;
       setTimer(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current!);
@@ -595,6 +618,7 @@ export default function CalibrationStep({ onComplete }: Props) {
             recDisplayRef.current = null;
           }
           setDropoutWarning(false);
+          timerPausedRef.current = false;
           setPhase('song_vote');
           return 0;
         }
@@ -645,6 +669,7 @@ export default function CalibrationStep({ onComplete }: Props) {
       // Use songsRef.current (always current) — NOT the stale 'songs' closure variable
       const calibrationWindows: EEGSample[][] = [];
       const labels: number[] = [];
+      const clipBoundaries: number[] = [];
       const currentSongs = songsRef.current;
 
       console.log(
@@ -652,14 +677,22 @@ export default function CalibrationStep({ onComplete }: Props) {
         `songBuf sizes = [${songBufs.current.map(b => b.length).join(', ')}]`
       );
 
+      let windowOffset = 0;
       currentSongs.forEach((_, i) => {
         const wins = splitIntoWindows(songBufs.current[i] ?? []);
         const lbl  = songLabels.current[i] ?? 0;
+        clipBoundaries.push(windowOffset);
         wins.forEach(w => {
           calibrationWindows.push(w);
           labels.push(lbl);
         });
+        windowOffset += wins.length;
       });
+
+      console.log(
+        `[CalibrationStep] clip_boundaries = [${clipBoundaries.join(', ')}] ` +
+        `(${clipBoundaries.length} songs, ${calibrationWindows.length} total windows)`
+      );
 
       if (calibrationWindows.length === 0) {
         throw new Error(
@@ -673,6 +706,7 @@ export default function CalibrationStep({ onComplete }: Props) {
         baseline_samples:    baselineWindows,
         calibration_samples: calibrationWindows,
         labels,
+        clip_boundaries:     clipBoundaries,
       };
 
       const resp = await fetch('http://localhost:5000/calibration/build', {
@@ -723,45 +757,74 @@ export default function CalibrationStep({ onComplete }: Props) {
 
       {/* ── Phase: Genre Select ────────────────────────────────────────── */}
       {phase === 'genre_select' && (
-        <div className="max-w-lg mx-auto space-y-6">
+        <div className="max-w-xl mx-auto space-y-8">
           <div className="text-center space-y-2">
             <h3 className="text-2xl font-light text-white">Quick Preference Check</h3>
             <p className="text-gray-400 font-light text-sm">
-              Select any genres you <strong className="text-red-400">dislike</strong>.
-              We&apos;ll include a few clips from these so the model can learn
-              what your brain looks like when you&apos;re <em>not</em> enjoying music.
-              Pick at least one.
+              Select at least one genre you <strong className="text-green-400">like</strong> and
+              one you <strong className="text-red-400">dislike</strong>. We&apos;ll build a
+              calibration playlist that contrasts your brain&apos;s response to both.
             </p>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {DISLIKE_GENRES.map(g => (
-              <button
-                key={g}
-                onClick={() =>
-                  setDislikedGenres(prev =>
-                    prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
-                  )
-                }
-                className={`p-3 rounded-xl border-2 text-sm font-light capitalize transition-all ${
-                  dislikedGenres.includes(g)
-                    ? 'border-red-500 bg-red-500/10 text-red-300'
-                    : 'border-gray-700 text-gray-400 hover:border-gray-500'
-                }`}
-              >
-                {g}
-              </button>
-            ))}
+
+          {/* Liked genres */}
+          <div className="space-y-3">
+            <p className="text-sm font-light text-green-400 uppercase tracking-widest">✓ Genres I like</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {LIKED_GENRES.map(g => (
+                <button
+                  key={g}
+                  onClick={() =>
+                    setLikedGenres(prev =>
+                      prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
+                    )
+                  }
+                  className={`p-2.5 rounded-xl border-2 text-xs font-light capitalize transition-all ${
+                    likedGenres.includes(g)
+                      ? 'border-green-500 bg-green-500/10 text-green-300'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-500'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
           </div>
-          {dislikedGenres.length === 0 && (
+
+          {/* Disliked genres */}
+          <div className="space-y-3">
+            <p className="text-sm font-light text-red-400 uppercase tracking-widest">✕ Genres I dislike</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {DISLIKE_GENRES.map(g => (
+                <button
+                  key={g}
+                  onClick={() =>
+                    setDislikedGenres(prev =>
+                      prev.includes(g) ? prev.filter(x => x !== g) : [...prev, g]
+                    )
+                  }
+                  className={`p-2.5 rounded-xl border-2 text-xs font-light capitalize transition-all ${
+                    dislikedGenres.includes(g)
+                      ? 'border-red-500 bg-red-500/10 text-red-300'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-500'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(likedGenres.length === 0 || dislikedGenres.length === 0) && (
             <p className="text-xs text-yellow-400/70 text-center">
-              ⚠️ Please select at least one genre you dislike to enable accurate calibration.
+              ⚠️ Please select at least one liked genre and one disliked genre.
             </p>
           )}
+
           <button
-            disabled={dislikedGenres.length === 0}
+            disabled={likedGenres.length === 0 || dislikedGenres.length === 0}
             onClick={() => {
-              // Pick clips now that we have the disliked genres
-              const picked = pickClips(dislikedGenres);
+              const picked = pickClips(likedGenres, dislikedGenres);
               songsRef.current = picked;
               setSongsState(picked);
               setResolvedIds(picked.map(s => s.trackId));
@@ -797,7 +860,7 @@ export default function CalibrationStep({ onComplete }: Props) {
                 <span className="text-purple-400 font-medium mt-0.5">2.</span>
                 <span>
                   You will listen to{' '}
-                  <strong className="text-white">{N_CLIPS} short clips</strong> (20 s each)
+                  <strong className="text-white">{N_CLIPS} short clips</strong> (45 s each)
                   that play back to back. Each clip starts recording automatically.
                 </span>
               </li>
@@ -940,9 +1003,9 @@ export default function CalibrationStep({ onComplete }: Props) {
 
               {/* Dropout warning — only shown if stream goes silent */}
               {dropoutWarning && (
-                <div className="bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-xs text-red-300 font-light text-center">
-                  ⚠️ No EEG data received for several seconds. Your headset may have disconnected.
-                  <br />Try adjusting the headset position or restarting calibration.
+                <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-xs text-yellow-300 font-light text-center animate-pulse">
+                  ⏸ Timer paused — headset disconnected. Reconnecting automatically…
+                  <br />Stay still. Recording will resume as soon as the headset reconnects.
                 </div>
               )}
 
@@ -1047,6 +1110,8 @@ export default function CalibrationStep({ onComplete }: Props) {
                 setErrorMsg('');
                 setRecCount(0);
                 setDropoutWarning(false);
+                setLikedGenres([]);
+                setDislikedGenres([]);
               }}
               className="px-6 py-2 rounded-full border border-gray-700 text-gray-400 hover:border-gray-500 text-sm font-light transition-colors"
             >

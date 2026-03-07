@@ -204,6 +204,9 @@ class RuleBasedEmotionPredictor:
     The emotion with the highest total score wins, subject to a short
     temporal-smoothing history (majority vote over the last N predictions).
 
+    If a baseline EEG recording is provided during init, personalised thresholds
+    are computed from it. Otherwise, generic thresholds are used.
+
     Scoring rationale
     -----------------
     focus   : elevated beta & gamma, moderate alpha, low theta
@@ -213,24 +216,143 @@ class RuleBasedEmotionPredictor:
     """
 
     # How many recent predictions to use for majority-vote smoothing
-    HISTORY_WINDOW: int = 3
+    HISTORY_WINDOW: int = 5
 
     # Buffer size that the server should accumulate before calling predict_emotion
     required_samples: int = REQUIRED_SAMPLES
 
-    def __init__(self, history_window: int = 3) -> None:
+    def __init__(
+        self,
+        history_window: int = 5,
+        baseline_channels: Optional[dict] = None,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        history_window : int
+            Number of recent predictions to use for majority-vote smoothing.
+        baseline_channels : dict or None
+            If provided, extract baseline features and compute personalised thresholds.
+            Keys: 'tp9', 'af7', 'af8', 'tp10' → np.ndarray
+        """
         self.HISTORY_WINDOW = history_window
         self._history: list[str] = []
+        
+        # Baseline features (computed if baseline is provided)
+        self._baseline_features: Optional[dict] = None
+        
+        # Personalised thresholds for this user's brain
+        self._thresholds = self._generic_thresholds()
+        
+        if baseline_channels is not None:
+            self._compute_baseline_thresholds(baseline_channels)
+    
+    @staticmethod
+    def _generic_thresholds() -> dict:
+        """
+        Hardcoded generic thresholds used when no baseline is available.
+        These are tuned for typical adult EEG on Muse 2.
+        """
+        return {
+            # Relative band power thresholds (as fraction of total)
+            "alpha_threshold":         0.16,      # relaxed if > 16%
+            "beta_threshold":          0.12,      # focused if > 12%
+            "theta_threshold":         0.30,      # tired if > 30% (global)
+            "gamma_threshold":         0.04,      # some focus if > 4%
+            "theta_alpha_ratio":       2.5,       # tired if > 2.5
+            "beta_alpha_ratio":        1.2,       # focused if > 1.2
+            # Asymmetry thresholds (log difference)
+            "faa_stress":              0.8,       # positive FAA > 0.8 → stress
+            "faa_calm":               -0.8,       # negative FAA < -0.8 → calm
+            # Heart rate thresholds
+            "hr_very_high":           110.0,      # > 110 bpm → stress/exercise
+            "hr_high":                 90.0,      # > 90 bpm → moderately activated
+            "hr_normal_high":          80.0,      # > 80 bpm → mildly elevated
+            "hr_low":                  70.0,      # < 70 bpm → resting
+            "hr_very_low":             60.0,      # < 60 bpm → drowsy
+            # HRV thresholds
+            "rmssd_very_high":        60.0,       # > 60 ms → high parasympathetic
+            "rmssd_high":             40.0,       # > 40 ms → parasympathetic
+            "rmssd_moderate":         25.0,       # > 25 ms → balanced
+            "rmssd_low":              15.0,       # < 15 ms → sympathetic
+        }
+    
+    def _compute_baseline_thresholds(self, baseline_channels: dict) -> None:
+        """
+        Extract features from baseline EEG and compute personalised thresholds.
+        
+        Baseline should be a 2.5–3 minute quiet rest recording.
+        """
+        self._baseline_features = extract_eeg_features(baseline_channels)
+        baseline = self._baseline_features
+        
+        # Extract key metrics from baseline
+        alpha_baseline = baseline["mean_alpha"]
+        beta_baseline  = baseline["mean_beta"]
+        theta_baseline = baseline["mean_theta"]
+        delta_baseline = baseline["mean_delta"]
+        gamma_baseline = baseline["mean_gamma"]
+        faa_baseline   = baseline["frontal_alpha_asymmetry"]
+        thr_baseline   = baseline["theta_alpha_ratio"]
+        bar_baseline   = baseline["beta_alpha_ratio"]
+        
+        # Compute total for relative power
+        total = alpha_baseline + beta_baseline + theta_baseline + delta_baseline + gamma_baseline + 1e-8
+        
+        # Relative powers
+        ra_base = alpha_baseline / total
+        rb_base = beta_baseline / total
+        rt_base = theta_baseline / total
+        rg_base = gamma_baseline / total
+        
+        # Personalised thresholds: set ABOVE the baseline rest values so a
+        # genuine state change is required to score highly.
+        #
+        # alpha: relaxed scores when alpha exceeds rest by ~50%.
+        #        Using 1.5× ensures the threshold isn't trivially reached
+        #        at rest while still being reachable during genuine relaxation.
+        # beta:  focus/stress score when beta is 30% above resting beta.
+        # theta: tired scores when theta is 40% above resting theta.
+        # FAA:   stress/calm require FAA to exceed baseline magnitude by 0.5
+        #        (a meaningful directional shift, not random EEG noise).
+        self._thresholds = {
+            "alpha_threshold":         max(0.06, ra_base + ra_base * 0.50),  # 50% above baseline
+            "beta_threshold":          max(0.08, rb_base + rb_base * 0.30),  # 30% above baseline
+            "theta_threshold":         max(0.25, rt_base + rt_base * 0.40),  # 40% above baseline
+            "gamma_threshold":         max(0.02, rg_base + rg_base * 0.50),  # 50% above baseline
+            "theta_alpha_ratio":       thr_baseline + 0.5,
+            "beta_alpha_ratio":        bar_baseline + 0.3,
+            # FAA thresholds: symmetric, require a real directional shift
+            "faa_stress":              max(0.3, abs(faa_baseline) + 0.5),
+            "faa_calm":               -max(0.3, abs(faa_baseline) + 0.5),
+            # Heart rate / HRV: use generic (PPG not typically recorded during baseline)
+            "hr_very_high":           110.0,
+            "hr_high":                 90.0,
+            "hr_normal_high":          80.0,
+            "hr_low":                  70.0,
+            "hr_very_low":             60.0,
+            "rmssd_very_high":        60.0,
+            "rmssd_high":             40.0,
+            "rmssd_moderate":         25.0,
+            "rmssd_low":              15.0,
+        }
+        
+        print("[OK] Personalised emotion thresholds computed from baseline:")
+        print(f"  Alpha threshold:       {self._thresholds['alpha_threshold']:.3f} (baseline={ra_base:.3f})")
+        print(f"  Beta threshold:        {self._thresholds['beta_threshold']:.3f} (baseline={rb_base:.3f})")
+        print(f"  Theta/Alpha ratio:     {self._thresholds['theta_alpha_ratio']:.3f} (baseline={thr_baseline:.3f})")
+        print(f"  FAA stress threshold:  {self._thresholds['faa_stress']:.3f} (baseline={faa_baseline:.3f})")
+        print(f"  FAA calm threshold:    {self._thresholds['faa_calm']:.3f}")
 
     # ── internal scoring ──────────────────────────────────────────────────
 
     def _score(self, eeg: dict, ppg: PPGFeatures) -> EmotionScores:
         """
         Compute a [0, 1] score for each emotion from feature evidence.
-        Scores are not normalised across emotions — the dominant emotion is
-        the one with the highest absolute score.
+        Uses personalised thresholds if baseline was provided, otherwise generic.
         """
         sc = {e: 0.0 for e in EMOTIONS}
+        t = self._thresholds  # shorthand for threshold dict
 
         # Convenience aliases
         alpha  = eeg["mean_alpha"]
@@ -238,122 +360,102 @@ class RuleBasedEmotionPredictor:
         theta  = eeg["mean_theta"]
         delta  = eeg["mean_delta"]
         gamma  = eeg["mean_gamma"]
-        faa    = eeg["frontal_alpha_asymmetry"]   # + → stress, – → calm
+        faa    = eeg["frontal_alpha_asymmetry"]
         thr    = eeg["theta_alpha_ratio"]
         bar    = eeg["beta_alpha_ratio"]
 
         total = alpha + beta + theta + delta + gamma + 1e-8
-
-        # Relative (fractional) band powers, more robust than absolute values
-        # Typical Muse ranges (awake, normal): delta 35-45%, theta 20-30%,
-        # alpha 10-18%, beta 8-14%, gamma 1-5%. Thresholds are calibrated to
-        # these realistic ranges — NOT idealized textbook values.
         ra = alpha / total     # relative alpha
         rb = beta  / total     # relative beta
         rt = theta / total     # relative theta
         rg = gamma / total     # relative gamma
-        # delta / total is intentionally excluded — chronically elevated on Muse
 
         # ── FOCUS ─────────────────────────────────────────────────────────
-        # Evidence for: elevated beta (>10%), high beta/alpha, low theta/alpha
-        sc["focus"] += 0.32 * min(rb  / 0.12, 1.0)               # beta > 12 %
-        sc["focus"] += 0.22 * min(bar / 1.2,  1.0)               # beta/alpha > 1.2
-        sc["focus"] += 0.20 * max(0.0, 1.0 - thr / 2.5)          # theta/alpha < 2.5
-        sc["focus"] += 0.12 * min(rg  / 0.04, 1.0)               # some gamma
-        sc["focus"] += 0.14 * max(0.0, 1.0 - abs(faa) / 1.2)    # symmetric FAA
+        # Evidence for: elevated beta, high beta/alpha, low theta/alpha,
+        # and BALANCED FAA (neither left nor right — frontal symmetry)
+        # KEY differentiator from stress: focus has |FAA| near zero
+        sc["focus"] += 0.28 * min(rb / t["beta_threshold"], 1.0)
+        sc["focus"] += 0.22 * min(bar / t["beta_alpha_ratio"], 1.0)
+        sc["focus"] += 0.18 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 2.0, 2.0))
+        sc["focus"] += 0.12 * min(rg / t["gamma_threshold"], 1.0)
+        # Frontal balance: score drops off as FAA magnitude grows
+        sc["focus"] += 0.20 * max(0.0, 1.0 - abs(faa) / max(t["faa_stress"], 0.5))
 
         # ── STRESS ────────────────────────────────────────────────────────
-        # Evidence for: elevated beta, alpha suppression, positive FAA
-        sc["stress"] += 0.32 * min(rb  / 0.12, 1.0)
-        sc["stress"] += 0.28 * min(max(faa,  0.0) / 0.8, 1.0)    # positive FAA → stress
-        sc["stress"] += 0.28 * max(0.0, 1.0 - ra / 0.12)         # alpha suppression
-        sc["stress"] += 0.12 * min(bar / 2.0,  1.0)              # high beta/alpha
+        # Evidence for: elevated beta, alpha SUPPRESSION, POSITIVE FAA
+        # (right-frontal dominance = withdrawal affect = stress/anxiety)
+        # KEY differentiator from focus: requires positive FAA
+        sc["stress"] += 0.22 * min(rb / t["beta_threshold"], 1.0)
+        sc["stress"] += 0.38 * min(max(faa, 0.0) / max(t["faa_stress"], 0.5), 1.0)
+        sc["stress"] += 0.28 * max(0.0, 1.0 - ra / t["alpha_threshold"])
+        sc["stress"] += 0.12 * min(bar / (t["beta_alpha_ratio"] + 0.8), 1.0)
 
         # ── RELAXED ───────────────────────────────────────────────────────
-        # Evidence for: elevated alpha (>15%), low beta, negative FAA
-        sc["relaxed"] += 0.36 * min(ra  / 0.16, 1.0)             # alpha > 16 %
-        sc["relaxed"] += 0.28 * min(max(-faa, 0.0) / 0.8, 1.0)   # negative FAA → calm
-        sc["relaxed"] += 0.18 * max(0.0, 1.0 - thr / 2.0)        # low theta/alpha
-        sc["relaxed"] += 0.10 * max(0.0, 1.0 - rb  / 0.12)       # low beta
-        sc["relaxed"] += 0.08 * max(0.0, 1.0 - rt  / 0.30)       # low theta
+        # Evidence for: elevated alpha, low beta, NEGATIVE FAA
+        # (left-frontal dominance = approach affect = positive/calm)
+        sc["relaxed"] += 0.35 * min(ra / t["alpha_threshold"], 1.0)
+        sc["relaxed"] += 0.30 * min(max(-faa, 0.0) / max(abs(t["faa_calm"]), 0.5), 1.0)
+        sc["relaxed"] += 0.15 * max(0.0, 1.0 - thr / max(t["theta_alpha_ratio"] * 1.5, 2.0))
+        sc["relaxed"] += 0.12 * max(0.0, 1.0 - rb / t["beta_threshold"])
+        sc["relaxed"] += 0.08 * max(0.0, 1.0 - rt / t["theta_threshold"])
 
         # ── TIRED ─────────────────────────────────────────────────────────
-        # Tired = high theta/alpha AND genuinely LOW beta.
-        # Key discriminator: elevated beta means the brain is ACTIVATED (alert/stress/focus),
-        # which is incompatible with fatigue. Gate the entire tired score by beta activity.
-        #   fatigue_gate → 1.0 when rb = 0   (no beta → could be tired)
-        #   fatigue_gate → 0.0 when rb ≥ 10% (beta present → clearly awake/activated)
-        fatigue_gate    = max(0.0, 1.0 - min(rb / 0.10, 1.0))
-        # alpha_supp_gate: suppresses tired when alpha is reasonably present (relaxed state)
-        # At ra=16% gate=0 (no tired); at ra=8% gate=0.5; at ra=0 gate=1.0
-        alpha_supp_gate = max(0.0, 1.0 - min(ra / 0.16, 1.0))
-        tired_gate      = fatigue_gate * alpha_supp_gate           # BOTH conditions required
-        sc["tired"] += 0.45 * min(thr / 3.0, 1.0) * tired_gate   # thr > 3 AND low beta AND low alpha
-        sc["tired"] += 0.35 * min(rt  / 0.35, 1.0) * tired_gate  # high theta AND low beta AND low alpha
-        sc["tired"] += 0.20 * max(0.0, 1.0 - ra  / 0.10)         # extreme alpha suppression (<10% only)
+        # Evidence for: high theta, high theta/alpha ratio, low beta.
+        # Additive scoring — no multiplicative gate that collapses to ~0.
+        # A drowsy-but-awake state has moderate beta and still fires theta.
+        sc["tired"] += 0.40 * min(thr / max(t["theta_alpha_ratio"], 2.0), 1.0)
+        sc["tired"] += 0.35 * min(rt  / max(t["theta_threshold"],   0.25), 1.0)
+        sc["tired"] += 0.15 * max(0.0, 1.0 - rb / t["beta_threshold"])
+        sc["tired"] += 0.10 * max(0.0, 1.0 - ra / t["alpha_threshold"])
 
         # ── PPG / cardiovascular adjustments ──────────────────────────────
-        # HR is a STRONG physiological signal — weight it heavily.
-        # Physical exercise (push-ups, running) drives HR to 100–170 bpm.
-        # That clearly contradicts "tired" and strongly suggests stress/arousal.
         if ppg.available and ppg.bpm is not None and ppg.rmssd is not None:
             bpm   = ppg.bpm
             rmssd = ppg.rmssd
 
-            # ── Heart Rate contribution ────────────────────────────────────
-            if bpm > 110:
-                # Very high HR (exercise / acute stress) — hard override
+            if bpm > t["hr_very_high"]:
                 sc["stress"]  += 0.40
                 sc["focus"]   += 0.10
-                sc["tired"]   -= 0.40   # physiologically incompatible with fatigue
+                sc["tired"]   -= 0.40
                 sc["relaxed"] -= 0.20
-            elif bpm > 90:
-                # Moderately elevated HR — likely activated state
+            elif bpm > t["hr_high"]:
                 sc["stress"]  += 0.22
                 sc["focus"]   += 0.08
                 sc["tired"]   -= 0.20
                 sc["relaxed"] -= 0.10
-            elif bpm > 80:
-                # Mildly elevated HR
+            elif bpm > t["hr_normal_high"]:
                 sc["stress"]  += 0.12
                 sc["focus"]   += 0.06
                 sc["tired"]   -= 0.08
-            elif bpm < 60:
-                # Very low HR — likely resting / drowsy
+            elif bpm < t["hr_very_low"]:
                 sc["tired"]   += 0.15
                 sc["relaxed"] += 0.08
-            elif bpm < 70:
-                # Low-normal HR → lean toward relaxed over tired
+            elif bpm < t["hr_low"]:
                 sc["tired"]   += 0.06
                 sc["relaxed"] += 0.08
 
-            # ── HRV (RMSSD) contribution ───────────────────────────────────
-            # High HRV  = parasympathetic dominance → relaxed / resting
-            # Low HRV   = sympathetic dominance → stress / high arousal
-            if rmssd > 60:
+            if rmssd > t["rmssd_very_high"]:
                 sc["relaxed"] += 0.18
                 sc["stress"]  -= 0.10
-            elif rmssd > 40:
+            elif rmssd > t["rmssd_high"]:
                 sc["relaxed"] += 0.12
                 sc["stress"]  -= 0.04
-            elif rmssd > 25:
-                # Moderate HRV — mildly parasympathetic, lean relaxed over tired
+            elif rmssd > t["rmssd_moderate"]:
                 sc["relaxed"] += 0.06
                 sc["tired"]   -= 0.04
-            elif rmssd < 15:
+            elif rmssd < t["rmssd_low"]:
                 sc["stress"]  += 0.18
                 sc["relaxed"] -= 0.10
-                sc["tired"]   -= 0.05   # low HRV + (probably) high HR → not tired
-            elif rmssd < 25:
+                sc["tired"]   -= 0.05
+            elif rmssd < t["rmssd_moderate"]:
                 sc["stress"]  += 0.10
                 sc["relaxed"] -= 0.05
 
-            # Combined HR + HRV cues
-            if rmssd < 20 and bpm > 85:
+            if rmssd < (t["rmssd_moderate"] - 5.0) and bpm > t["hr_high"]:
                 sc["stress"]  += 0.15
                 sc["relaxed"] -= 0.08
                 sc["tired"]   -= 0.08
-            elif rmssd > 50 and bpm < 75:
+            elif rmssd > t["rmssd_high"] and bpm < t["hr_low"]:
                 sc["relaxed"] += 0.10
                 sc["stress"]  -= 0.05
 

@@ -265,17 +265,10 @@ class LikeDislikePredictor:
 
         self._user: Optional[dict] = self._load_user_pkl()
 
-        # Incremental Z-score accumulator — grows during a session.
-        # Notebook computes Z-score from ALL participant windows; we replicate
-        # this by seeding from baseline+cal windows and adding live windows.
-        self._zscore_windows: list = []  # list of (4, 512) baseline-corrected arrays
-        if self._user is not None:
-            self._seed_zscore_from_profile()
-
-        print(f"✓ LikeDislikePredictor ready  "
+        print(f"[OK] LikeDislikePredictor ready  "
               f"(model: {'yes' if self._model else 'no'}, "
               f"user profile: {'yes' if self._user else 'no'}, "
-              f"zscore_seed={len(self._zscore_windows)} windows)")
+              f"zscore: {'frozen from user.pkl' if self._user and 'zscore_mu' in (self._user or {}) else 'none - will use generic'})")
 
     # ── persistence ───────────────────────────────────────────────────────
 
@@ -311,46 +304,6 @@ class LikeDislikePredictor:
     def reload_user_profile(self) -> None:
         """Re-read user.pkl from disk (call after calibration POST)."""
         self._user = self._load_user_pkl()
-        self._zscore_windows = []
-        if self._user is not None:
-            self._seed_zscore_from_profile()
-
-    # ── Z-score accumulator helpers ──────────────────────────────────────
-
-    def _seed_zscore_from_profile(self) -> None:
-        """
-        Pre-seed _zscore_windows from the stored mu/sig in user.pkl so that
-        predict() has a reasonable Z-score from the very first window.
-        We generate synthetic seed vectors that reproduce the stored statistics.
-        Notebook used ~200 windows per participant; we can't regenerate those,
-        so we create N_SEED representative vectors instead.
-        """
-        if self._user is None:
-            return
-        n_cal = int(self._user.get("n_cal_windows", 0))
-        n_seed = max(20, n_cal)  # match the number of windows we had at calibration
-        mu  = np.asarray(self._user["zscore_mu"]).reshape(N_EEG, 1)   # (4, 1)
-        sig = np.asarray(self._user["zscore_sig"]).reshape(N_EEG, 1)  # (4, 1)
-        rng = np.random.RandomState(42)
-        for _ in range(n_seed):
-            # z = (x - mu) / sig  → x = z*sig + mu  where z ~ N(0,1)
-            z = rng.randn(N_EEG, WIN_MODEL).astype(np.float32)
-            x = z * sig + mu  # (4, 512) — baseline-corrected synthetic window
-            self._zscore_windows.append(x)
-
-    def _recompute_zscore(self) -> tuple:
-        """
-        Recompute Z-score mu/sig from all accumulated windows.
-        Matches notebook Step 2:  mu = X.mean(axis=(0,2))  sig = X.std(axis=(0,2))
-        Returns (mu, sig) each shaped (4, 1).
-        """
-        if not self._zscore_windows:
-            return (np.zeros((N_EEG, 1), dtype=np.float32),
-                    np.ones( (N_EEG, 1), dtype=np.float32))
-        stack = np.stack(self._zscore_windows, axis=0)  # (N, 4, 512)
-        mu  = stack.mean(axis=(0, 2)).reshape(N_EEG, 1).astype(np.float32)  # (4, 1)
-        sig = (stack.std(axis=(0, 2)) + 1e-8).reshape(N_EEG, 1).astype(np.float32)
-        return mu, sig
 
     # ── baseline from raw windows ─────────────────────────────────────────
 
@@ -414,24 +367,14 @@ class LikeDislikePredictor:
 
         win_corr = win - baseline  # (4, 512), still in µV scale
 
-        # ── 3. Incremental Z-score (notebook Step 2 match) ────────────────
-        # Add this window to the accumulator and recompute Z-score.
-        # Notebook: mu/sig computed over ALL participant windows.
-        # We replicate this by growing the accumulator each call.
-        self._zscore_windows.append(win_corr.copy())
-        # Recompute every 5 windows (cheap; avoids O(n²) cost per window)
-        n_acc = len(self._zscore_windows)
-        if n_acc % 5 == 0 or n_acc == 1:
-            zmu, zsig = self._recompute_zscore()
-            if self._user is not None:
-                self._user["_live_zmu"]  = zmu
-                self._user["_live_zsig"] = zsig
-
-        # Use live Z-score if available, else fall back to stored calibration stats
-        if self._user is not None and "_live_zmu" in self._user:
-            zmu  = self._user["_live_zmu"]
-            zsig = self._user["_live_zsig"]
-        elif self._user and "zscore_mu" in self._user:
+        # ── 3. Z-score — FROZEN stats from user.pkl, never recomputed live ──
+        # Matches notebook Step 2 exactly: mu/sig computed ONCE from all user
+        # windows (baseline + calibration) at calibration time, then applied
+        # statically to every live window.
+        # Previous approach (live accumulator) caused distribution shift:
+        # features at window 5 and window 150 were on different scales,
+        # inconsistent with the single fixed scale the StandardScaler expects.
+        if self._user and "zscore_mu" in self._user:
             zmu  = np.asarray(self._user["zscore_mu"]).reshape(N_EEG, 1).astype(np.float32)
             zsig = np.asarray(self._user["zscore_sig"]).reshape(N_EEG, 1).astype(np.float32)
         else:
@@ -470,7 +413,6 @@ class LikeDislikePredictor:
             "threshold":     round(threshold, 3),
             "calibrated":    bool(self._user and self._user.get("has_iso")),
             "n_cal_windows": int(self._user.get("n_cal_windows", 0)) if self._user else 0,
-            "n_zscore_win":  n_acc,
         }
 
     # ── profile building (called after calibration) ───────────────────────
@@ -480,6 +422,7 @@ class LikeDislikePredictor:
         baseline_windows: list,
         calibration_windows: list,
         labels: list,
+        clip_boundaries: Optional[list] = None,
     ) -> dict:
         """
         Build and persist a per-user profile.
@@ -493,6 +436,11 @@ class LikeDislikePredictor:
                               each calibration song clip.
         labels              : list of int  (0 = like, 1 = dislike)
                               One label per *calibration* window.
+        clip_boundaries     : list of int, optional
+                              Index of the first window belonging to each song.
+                              e.g. [0, 7, 14, 21, ...] for 7 windows per song.
+                              If None, falls back to label-change detection
+                              (known limitation: consecutive same-label songs merge).
 
         Returns
         -------
@@ -552,20 +500,72 @@ class LikeDislikePredictor:
         label_counts = {}
         if self._model is not None and self._scaler is not None:
 
-            # ── 3. Feature extraction ─────────────────────────────────────
-            feats = []
-            for win_256 in calibration_windows:
-                win = downsample_eeg(win_256).astype(np.float32)
-                win = np.nan_to_num(win, nan=0.0, posinf=0.0, neginf=0.0)
-                win = win - baseline_mean
-                win = (win - _zmu) / (_zsig + 1e-8)
-                win = _reject_artefacts(win)
-                feats.append(extract_105(win))
+            # ── 3. Feature extraction — middle 50% of each clip only ──────
+            # Group windows into per-song clips using explicit boundaries when
+            # available (most accurate), or fall back to label-change detection.
+            #
+            # The label-change fallback has a known flaw: consecutive same-label
+            # songs (e.g. two dislikes in a row) merge into one large clip,
+            # so only 4 "clips" appear even when 10 songs were played.
+            clip_wins: list = []
+            clip_lbls: list = []
+
+            if clip_boundaries is not None and len(clip_boundaries) > 1:
+                # Explicit per-song boundaries supplied by frontend — most accurate.
+                boundaries = list(clip_boundaries) + [len(calibration_windows)]
+                for i in range(len(boundaries) - 1):
+                    s = boundaries[i]
+                    e = boundaries[i + 1]
+                    cw = calibration_windows[s:e]
+                    cl = labels[s]  # label for this song
+                    if cw:
+                        clip_wins.append(cw)
+                        clip_lbls.append(cl)
+                print(f"  Clip detection: explicit boundaries → {len(clip_wins)} songs")
+            else:
+                # Fallback: group by label change.
+                # ⚠ consecutive same-label songs merge — prefer explicit boundaries.
+                cur_clip: list = []
+                cur_lbl        = labels[0]
+                for win_256, lbl in zip(calibration_windows, labels):
+                    if lbl == cur_lbl:
+                        cur_clip.append(win_256)
+                    else:
+                        clip_wins.append(cur_clip)
+                        clip_lbls.append(cur_lbl)
+                        cur_clip = [win_256]
+                        cur_lbl  = lbl
+                if cur_clip:
+                    clip_wins.append(cur_clip)
+                    clip_lbls.append(cur_lbl)
+                print(f"  Clip detection: label-change fallback → {len(clip_wins)} clips "
+                      f"(⚠ consecutive same-label songs may have merged)")
+
+            feats      = []
+            feat_labels: list = []
+            total_before = sum(len(c) for c in clip_wins)
+            for clip, lbl in zip(clip_wins, clip_lbls):
+                n     = len(clip)
+                start = n // 4          # skip first 25%
+                end   = 3 * n // 4      # skip last 25%
+                mid   = clip[start:end] if end > start else clip
+                for win_256 in mid:
+                    win = downsample_eeg(win_256).astype(np.float32)
+                    win = np.nan_to_num(win, nan=0.0, posinf=0.0, neginf=0.0)
+                    win = win - baseline_mean
+                    win = (win - _zmu) / (_zsig + 1e-8)
+                    win = _reject_artefacts(win)
+                    feats.append(extract_105(win))
+                    feat_labels.append(lbl)
+
+            print(f"  Calibration clips: {len(clip_wins)}, windows: "
+                  f"{total_before} total -> {len(feats)} after middle-50% filter "
+                  f"({total_before - len(feats)} onset/offset windows dropped)")
 
             feats      = np.nan_to_num(np.array(feats, dtype=np.float32),
                                         nan=0.0, posinf=0.0, neginf=0.0)
             feats_sc   = self._scaler.transform(feats)
-            labels_arr = np.array(labels, dtype=np.int32)
+            labels_arr = np.array(feat_labels, dtype=np.int32)
             label_counts = {
                 int(k): int(v)
                 for k, v in zip(*np.unique(labels_arr, return_counts=True))
@@ -629,26 +629,20 @@ class LikeDislikePredictor:
         else:
             print("  No base model available — saving baseline/Z-score stats only.")
 
-        # ── 6. Seed the Z-score accumulator from baseline + cal windows ───
-        # This ensures predict() starts with the same Z-score distribution
-        # that was computed during build_user_profile.
-        self._zscore_windows = []
-        for _w in [baseline_corr, cal_corr] if len(cal_128) > 0 \
-                   else [baseline_corr]:
-            for _row in _w:
-                self._zscore_windows.append(_row.copy())
-        print(f"  Z-score accumulator seeded: {len(self._zscore_windows)} windows")
-
-        # ── 7. Persist ────────────────────────────────────────────────────
+        # ── 6. Persist ────────────────────────────────────────────────────
+        # Z-score stats are FROZEN here. predict() reads them directly from
+        # user.pkl and never recomputes them — matching notebook Step 2 exactly.
         user_data: dict = {
-            "baseline":        baseline_mean,
-            "zscore_mu":       zscore_mu,
-            "zscore_sig":      zscore_sig,
-            "iso_calibrator":  iso,
-            "threshold":       0.5,    # always 0.5 — notebook never changes this
-            "n_cal_windows":   len(calibration_windows),
-            "has_iso":         bool(iso),
-            "label_counts":    label_counts,
+            "baseline":              baseline_mean,
+            "baseline_for_emotion":  baseline_128.reshape(N_EEG, -1).astype(np.float32),
+            "zscore_mu":             zscore_mu,    # (4,1,1) FROZEN — never updated
+            "zscore_sig":            zscore_sig,   # (4,1,1) FROZEN — never updated
+            "iso_calibrator":        iso,
+            "threshold":             0.5,
+            "n_cal_windows":         len(calibration_windows),
+            "n_clean_windows":       len(feats) if self._model else 0,
+            "has_iso":               bool(iso),
+            "label_counts":          label_counts,
         }
         self._save_user_pkl(user_data)
         return user_data

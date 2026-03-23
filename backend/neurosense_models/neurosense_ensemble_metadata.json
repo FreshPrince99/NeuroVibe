@@ -1,0 +1,31 @@
+{
+  "n_features": 128,
+  "channels_order": [
+    "TP9",
+    "AF7",
+    "AF8",
+    "TP10"
+  ],
+  "normalization": "per_window_per_channel_zscore",
+  "n_windows": 23672,
+  "n_subjects": 30,
+  "n_sessions": 837,
+  "subject_independent_test_ba": 0.5863474011906211,
+  "subject_independent_test_auc": 0.6382419365283658,
+  "subject_dependent_test_ba": 0.8423190745224644,
+  "subject_dependent_test_auc": 0.942601058809045,
+  "cal_sessions_for_threshold": 5,
+  "optuna_trials": 50,
+  "best_xgb_params": {
+    "n_estimators": 486,
+    "max_depth": 8,
+    "min_child_weight": 5,
+    "lr": 0.011455356310090994,
+    "subsample": 0.7069028877185635,
+    "colsample": 0.5167929424672361,
+    "colsample_lvl": 0.8015112504670927,
+    "alpha": 9.551743658898735,
+    "lambda": 8.810389339671355,
+    "gamma": 0.6041297184693766
+  }
+}

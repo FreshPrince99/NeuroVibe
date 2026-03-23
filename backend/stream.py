@@ -1,3 +1,5 @@
+## Old legacy code to connect locally to BlueMuse's LSL stream. Not used in production, but kept for reference.
+
 from pylsl import StreamInlet, resolve_byprop
 import time
 import numpy as np

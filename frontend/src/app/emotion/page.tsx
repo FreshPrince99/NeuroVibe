@@ -57,16 +57,32 @@ export default function EmotionPage() {
     initSession(mode);
   }, []);
 
-  // Record EEG snapshots for the results page (music modes: use VAD as proxy)
+  // Rule-based emotion scores (focus/stress/relaxed/tired as 0-1 values)
+  const [emotionScores, setEmotionScores] = useState<{ focus: number; stress: number; relaxed: number; tired: number } | null>(null);
+
+  // Record EEG snapshots for the results page
   const vadRef = useRef(predictedVAD);
+  const scoresRef = useRef(emotionScores);
   useEffect(() => { vadRef.current = predictedVAD; }, [predictedVAD]);
+  useEffect(() => { scoresRef.current = emotionScores; }, [emotionScores]);
   useEffect(() => {
     if (sessionMode === 'cognitive') return; // CognitiveTrainingView handles its own snapshots
     const id = setInterval(() => {
       const vad = vadRef.current;
-      const focus  = vad ? Math.min(1, Math.max(0, vad.arousal))  : 0.5;
-      const calm   = vad ? Math.min(1, Math.max(0, 1 - vad.arousal * 0.6 + vad.valence * 0.4)) : 0.5;
-      const control = vad ? Math.min(1, Math.max(0, vad.dominance)) : 0.5;
+      const sc  = scoresRef.current;
+      let focus: number, calm: number, control: number;
+      if (sc) {
+        // Derive metrics from rule-based scores
+        focus   = Math.min(1, Math.max(0, sc.focus));
+        calm    = Math.min(1, Math.max(0, sc.relaxed - sc.stress * 0.5));
+        control = Math.min(1, Math.max(0, 1 - sc.tired));
+      } else if (vad) {
+        focus   = Math.min(1, Math.max(0, vad.arousal));
+        calm    = Math.min(1, Math.max(0, 1 - vad.arousal * 0.6 + vad.valence * 0.4));
+        control = Math.min(1, Math.max(0, vad.dominance));
+      } else {
+        return; // no data yet — skip snapshot so graph doesn't start flat
+      }
       addEEGSnapshot({ focus, calm, control, symmetry: control, ppg: focus });
     }, 5000);
     return () => clearInterval(id);
@@ -95,12 +111,11 @@ export default function EmotionPage() {
     });
 
     // Listen for emotion predictions
-    socketRef.current.on('emotion_prediction', (data: { emotion: string; vad?: VADData }) => {
+    socketRef.current.on('emotion_prediction', (data: { emotion: string; vad?: VADData; scores?: { focus: number; stress: number; relaxed: number; tired: number } }) => {
       console.log('✓ Received emotion prediction:', data.emotion);
       setPredictedEmotion(data.emotion);
-      if (data.vad) {
-        setPredictedVAD(data.vad);
-      }
+      if (data.vad) setPredictedVAD(data.vad);
+      if (data.scores) setEmotionScores(data.scores);
       setConnectionStatus('Live prediction active');
     });
 
@@ -130,6 +145,25 @@ export default function EmotionPage() {
       }
     };
   }, [router]);
+
+  // Global unmount cleanup — clears watchdog and test-mode interval so they
+  // don't leak into a new session started from the results page.
+  useEffect(() => {
+    return () => {
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+      if (testModeIntervalRef.current) {
+        clearInterval(testModeIntervalRef.current);
+        testModeIntervalRef.current = null;
+      }
+      if (clientRef.current) {
+        try { clientRef.current.disconnect(); } catch { /* ignore */ }
+        clientRef.current = null;
+      }
+    };
+  }, []);
 
   // Reconnect when the tab comes back to the foreground.
   // Chrome suspends BLE in backgrounded tabs — without this the headset appears

@@ -63,7 +63,7 @@ export default function EmotionView({
   const songEmotionsRef = useRef<string[]>([]);
   const songValencesRef = useRef<number[]>([]);
   const songStartTimeRef = useRef<number>(Date.now());
-  const currentSongRef = useRef<{ name: string; artist: string; uri: string; genre: string } | null>(null);
+  const currentSongRef = useRef<{ name: string; artist: string; uri: string; genre: string; albumArt?: string } | null>(null);
   const lastValenceRef = useRef<string | undefined>(undefined);
 
   // Collect emotions while a song is playing
@@ -94,6 +94,7 @@ export default function EmotionView({
       artist: currentSongRef.current.artist,
       genre: currentSongRef.current.genre,
       uri: currentSongRef.current.uri,
+      coverUrl: currentSongRef.current.albumArt,
       emotions: [...songEmotionsRef.current],
       avgValence,
       listeningSeconds,
@@ -101,7 +102,7 @@ export default function EmotionView({
     });
   }, []);
 
-  const handleTrackChange = useCallback((track: { name: string; artist: string; uri: string; genre: string } | null) => {
+  const handleTrackChange = useCallback((track: { name: string; artist: string; uri: string; genre: string; albumArt?: string } | null) => {
     // Flush previous song before switching
     flushCurrentSong();
     // Reset trackers for new song

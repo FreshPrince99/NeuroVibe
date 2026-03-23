@@ -39,26 +39,26 @@ const ACTIVITIES: Array<{ id: ActivityId; title: string; description: string; ch
   {
     id: 'neural-ball',
     title: 'Neural Expansion Ball',
-    description: 'Wear the headset and grow the sphere by sustaining focus + calm control for 3–5 minutes.',
-    channels: 'AF7 • AF8 • TP9 • TP10 • VAD',
+    description: 'Grow the sphere by raising BOTH focus AND calm at the same time. If either drops the sphere shrinks — sustain a relaxed-alert state to keep it growing.',
+    channels: 'AF7 • AF8 • TP9 • TP10',
   },
   {
     id: 'neuro-drive',
     title: 'Neuro Drive',
-    description: 'Drive a car with your brain. Speed rises with steady focus and drops with unstable signals.',
-    channels: 'AF7 • AF8 • TP9 • TP10 • VAD',
+    description: 'Race a car using your brain. High focus keeps the car straight and accelerating. Losing focus causes unstable swerving. Complete the track as quickly as possible.',
+    channels: 'AF7 • AF8 • TP9 • TP10',
   },
   {
     id: 'signal-shield',
     title: 'Signal Shield',
-    description: 'Keep a shield strong by balancing frontal symmetry and temporal stability under pressure.',
-    channels: 'AF7 • AF8 • TP9 • TP10',
+    description: 'Strengthen a shield by balancing your left and right frontal EEG activity. Hemispheric balance reflects emotional equilibrium — keep both sides equal to stay strong.',
+    channels: 'AF7 • AF8',
   },
   {
     id: 'pulse-pilot',
     title: 'Pulse Pilot',
-    description: 'Regulate your heart-wave rhythm (Muse 2 PPG) while staying mentally stable.',
-    channels: 'PPG • AF7 • AF8 • TP9 • TP10 • VAD',
+    description: 'Smooth your heart rhythm using paced breathing. Follow the breathing circle — inhale 4s, hold 1s, exhale 6s. A more regular PPG waveform means better vagal tone.',
+    channels: 'PPG • AF7 • AF8',
   },
 ];
 
@@ -253,21 +253,37 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
   lapTimeSeconds?: number | null;
 }) {
   if (selectedActivity === 'neural-ball') {
-    // Colour shifts blue → cyan → green → gold as progress rises
-    const hue = Math.round(200 + progressValue * 40);       // 200→240 blue range
-    const glow = Math.round(progressValue * 80);
+    const displayProgress = clamp(Math.sqrt(metrics.focus * metrics.calm));
+    const hue = Math.round(180 + displayProgress * 60); // cyan → teal → green
+    const glow = Math.round(displayProgress * 100);
     const rings = [1.6, 1.3, 1.0];
+    const isBalanced = Math.abs(metrics.focus - metrics.calm) < 0.18;
+    const limitingMetric = metrics.focus < metrics.calm ? 'focus' : 'calm';
+
     return (
-      <div className="flex flex-col items-center gap-4">
+      <div className="flex flex-col items-center gap-5">
+        {/* Guidance banner */}
+        <div className="rounded-xl border border-gray-700 bg-black/40 px-5 py-3 text-center">
+          {isBalanced && displayProgress > 0.5 ? (
+            <p className="text-sm font-medium text-emerald-300">Great balance — sphere is growing</p>
+          ) : (
+            <p className="text-sm font-medium text-amber-300">
+              Raise your <span className="font-bold capitalize">{limitingMetric}</span> to grow the sphere
+            </p>
+          )}
+          <p className="mt-0.5 text-xs text-gray-500">Both focus AND calm must be high simultaneously</p>
+        </div>
+
+        {/* Sphere */}
         <div className="relative flex h-72 w-72 items-center justify-center">
           {rings.map((scale, i) => (
             <div
               key={i}
-              className="absolute rounded-full border border-cyan-400/30"
+              className="absolute rounded-full border"
               style={{
-                width: `${scale * (0.7 + progressValue * 0.5) * 200}px`,
-                height: `${scale * (0.7 + progressValue * 0.5) * 200}px`,
-                opacity: 0.3 - i * 0.08,
+                width: `${scale * (0.7 + displayProgress * 0.5) * 200}px`,
+                height: `${scale * (0.7 + displayProgress * 0.5) * 200}px`,
+                borderColor: `hsla(${hue}, 70%, 60%, ${0.25 - i * 0.07})`,
                 transition: 'all 450ms ease',
               }}
             />
@@ -275,153 +291,214 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
           <div
             className="flex items-center justify-center rounded-full text-2xl font-bold text-white"
             style={{
-              width: `${(0.7 + progressValue * 0.5) * 200}px`,
-              height: `${(0.7 + progressValue * 0.5) * 200}px`,
+              width: `${(0.7 + displayProgress * 0.5) * 200}px`,
+              height: `${(0.7 + displayProgress * 0.5) * 200}px`,
               background: `radial-gradient(circle, hsl(${hue},80%,60%) 0%, hsl(${hue},60%,30%) 100%)`,
               boxShadow: `0 0 ${glow}px hsl(${hue},80%,60%)`,
               transition: 'all 450ms ease',
             }}
           >
-            {Math.round(progressValue * 100)}%
+            {Math.round(displayProgress * 100)}%
           </div>
         </div>
-        <div className="grid w-full max-w-xs grid-cols-2 gap-2 text-sm">
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Focus<br /><span className="text-lg text-cyan-300">{Math.round(metrics.focus * 100)}%</span></div>
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">Calm<br /><span className="text-lg text-cyan-300">{Math.round(metrics.calm * 100)}%</span></div>
+
+        {/* Contribution bars */}
+        <div className="grid w-full max-w-sm grid-cols-2 gap-3 text-sm">
+          {([
+            { label: 'Focus', value: metrics.focus, okColor: '#22d3ee', badColor: '#f87171', desc: 'Frontal engagement' },
+            { label: 'Calm', value: metrics.calm, okColor: '#ec4899', badColor: '#f87171', desc: 'Low arousal' },
+          ] as const).map(({ label, value, okColor, badColor, desc }) => {
+            const ok = value >= 0.45;
+            const color = ok ? okColor : badColor;
+            return (
+              <div key={label} className="rounded-lg border bg-black/40 p-3"
+                style={{ borderColor: ok ? `${okColor}40` : '#f8717130' }}>
+                <div className="flex justify-between text-gray-300">
+                  <span>{label}</span>
+                  <span style={{ color }} className="font-semibold">{Math.round(value * 100)}%</span>
+                </div>
+                <div className="mt-2 h-2 rounded-full bg-gray-800">
+                  <div className="h-full rounded-full transition-all duration-300"
+                    style={{ width: `${Math.round(value * 100)}%`, background: color }} />
+                </div>
+                <p className="mt-1 text-xs" style={{ color: `${color}90` }}>
+                  {desc} · {ok ? '✓ Good' : 'Needs work'}
+                </p>
+              </div>
+            );
+          })}
         </div>
       </div>
     );
   }
 
   if (selectedActivity === 'neuro-drive') {
-    const speed = Math.round(clamp(progressValue) * 220);
-    const raceProgress = clamp(progressValue) * 100;
-    const isFinished = progressValue >= 1.0;
-    const drift = (0.5 - metrics.stability) * 76;
-    const laneHalfWidth = 88;
-    const edgeWarning = Math.abs(drift) > laneHalfWidth * 0.82;
-    const scrollMs = Math.max(1200 - speed * 4, 240);
-    const engineMs = Math.max(650 - speed * 1.6, 220);
-    const speedStrength = clamp(speed / 220);
-    const flameLength = 8 + speedStrength * 18;
-    const remainingMeters = Math.max(0, Math.round((1 - clamp(progressValue)) * 100));
+    const speedFraction = clamp(metrics.focus * 0.7 + metrics.control * 0.3);
+    const speedKmh = Math.round(speedFraction * 220);
+    const raceProgress = clamp(progressValue);
+    const isFinished = raceProgress >= 1.0;
+    const remainingPct = Math.max(0, 100 - Math.round(raceProgress * 100));
+
+    // Car swerves when stability is low; stays centred when focus is high
+    const instability = Math.max(0, 0.75 - metrics.stability);
+    const swerveAmp = instability * 85;
+    const swerveFreq = 0.4 + instability * 1.2; // Hz
+    const t = Date.now() / 1000;
+    const rawDrift = metrics.stability > 0.70 ? 0 : Math.sin(t * swerveFreq * Math.PI * 2) * swerveAmp;
+    const edgeWarning = Math.abs(rawDrift) > 68;
+
+    const scrollMs = Math.max(1200 - speedKmh * 4, 240);
+    const engineMs = Math.max(650 - speedKmh * 1.6, 220);
+    const flameLength = 8 + speedFraction * 18;
 
     return (
       <div className="mx-auto w-full max-w-4xl space-y-4">
         <style>{`
-          @keyframes neuro-track-scroll {
+          @keyframes nd-road-scroll {
             from { background-position-y: 0; }
             to   { background-position-y: 220px; }
           }
-          @keyframes neuro-engine-thrum {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-2px); }
+          @keyframes nd-engine {
+            0%, 100% { transform: translateY(0px) translateX(var(--nd-drift, 0px)); }
+            50%       { transform: translateY(-2px) translateX(var(--nd-drift, 0px)); }
           }
-          @keyframes neuro-speed-line {
+          @keyframes nd-speed-line {
             from { transform: translateY(0); opacity: 0; }
-            15% { opacity: 1; }
-            to { transform: translateY(18px); opacity: 0; }
+            15%  { opacity: 1; }
+            to   { transform: translateY(18px); opacity: 0; }
           }
-          @keyframes neuro-pulse-dot {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6); }
-            70% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+          @keyframes nd-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+            70%       { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
           }
         `}</style>
 
         <div className="relative overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-950 p-4">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(56,189,248,0.15),transparent_45%),linear-gradient(to_bottom,rgba(30,41,59,0.7),rgba(2,6,23,0.9))]" />
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(56,189,248,0.12),transparent_45%)]" />
 
-          <div className="relative h-[30rem] overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900">
-            <div
-              className="absolute inset-0"
+          {/* ── Mini-map track strip ─────────────────────────────── */}
+          <div className="relative mb-3 h-8 overflow-hidden rounded-lg border border-slate-700/60 bg-slate-900">
+            <div className="absolute inset-y-0 left-0 right-0 flex items-center px-2 gap-1">
+              <span className="text-[10px] text-slate-400 shrink-0">START</span>
+              <div className="relative flex-1 h-3 rounded-full bg-slate-800 mx-1">
+                {/* Completed distance fill */}
+                <div className="h-full rounded-full bg-gradient-to-r from-cyan-600 to-emerald-500 transition-all duration-500"
+                  style={{ width: `${raceProgress * 100}%` }} />
+                {/* Car icon on track */}
+                <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 flex items-center justify-center transition-all duration-500"
+                  style={{ left: `${raceProgress * 100}%` }}>
+                  <div className="w-3 h-2 rounded-sm bg-cyan-300 border border-cyan-200/60" />
+                </div>
+              </div>
+              <span className="text-[10px] text-emerald-400 shrink-0">FINISH</span>
+            </div>
+            <div className="absolute right-14 inset-y-0 flex items-center">
+              <span className="text-[10px] font-semibold text-emerald-300">{Math.round(raceProgress * 100)}%</span>
+            </div>
+          </div>
+
+          {/* ── Perspective road ─────────────────────────────────── */}
+          <div className="relative h-[26rem] overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900">
+            {/* Road surface */}
+            <div className="absolute inset-0"
               style={{
                 clipPath: 'polygon(14% 100%, 86% 100%, 62% 0%, 38% 0%)',
                 background: 'linear-gradient(to bottom, rgba(71,85,105,0.35), rgba(15,23,42,0.95))',
-              }}
-            />
-
-            <div
-              className="absolute inset-0"
+              }} />
+            {/* Road markings */}
+            <div className="absolute inset-0"
               style={{
                 clipPath: 'polygon(14% 100%, 86% 100%, 62% 0%, 38% 0%)',
-                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(148,163,184,0.22) 0px, rgba(148,163,184,0.22) 6px, rgba(15,23,42,0) 6px, rgba(15,23,42,0) 34px)',
-                animation: `neuro-track-scroll ${scrollMs}ms linear infinite`,
-              }}
-            />
-
+                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(148,163,184,0.22) 0px, rgba(148,163,184,0.22) 6px, transparent 6px, transparent 34px)',
+                animation: `nd-road-scroll ${scrollMs}ms linear infinite`,
+              }} />
+            {/* Kerbs */}
             <div className="absolute inset-y-0 left-[14%] w-2 bg-gradient-to-b from-amber-200/80 via-amber-300/50 to-amber-400/70" />
             <div className="absolute inset-y-0 right-[14%] w-2 bg-gradient-to-b from-amber-200/80 via-amber-300/50 to-amber-400/70" />
-
-            <div
-              className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2"
+            {/* Centre dashes */}
+            <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2"
               style={{
-                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(226,232,240,0.95) 0px, rgba(226,232,240,0.95) 20px, transparent 20px, transparent 58px)',
-                animation: `neuro-track-scroll ${Math.max(scrollMs * 0.75, 180)}ms linear infinite`,
-              }}
-            />
+                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(226,232,240,0.9) 0px, rgba(226,232,240,0.9) 20px, transparent 20px, transparent 58px)',
+                animation: `nd-road-scroll ${Math.max(scrollMs * 0.75, 180)}ms linear infinite`,
+              }} />
 
-            <div className="absolute left-[34%] right-[34%] top-4 h-6 rounded bg-[repeating-linear-gradient(90deg,#111827_0_10px,#e5e7eb_10px_20px)] ring-1 ring-white/35" />
-            <p className="absolute left-1/2 top-4 -translate-x-1/2 text-[10px] font-bold tracking-[0.35em] text-slate-100">FINISH</p>
-
+            {/* Speed readout */}
             <div className="absolute left-4 top-4 rounded-lg border border-cyan-300/40 bg-slate-950/75 px-3 py-2 backdrop-blur-sm">
               <p className="text-[10px] tracking-[0.2em] text-cyan-200">SPEED</p>
-              <p className="text-2xl font-semibold text-cyan-100">{speed}<span className="ml-1 text-xs font-normal text-cyan-300">km/h</span></p>
+              <p className="text-2xl font-semibold text-cyan-100">{speedKmh}<span className="ml-1 text-xs font-normal text-cyan-300">km/h</span></p>
             </div>
 
-            <div className="absolute right-4 top-4 w-20 rounded-lg border border-slate-600/70 bg-slate-950/80 p-2 text-center backdrop-blur-sm">
-              <p className="text-[10px] tracking-[0.18em] text-slate-300">TRACK</p>
-              <div className="mx-auto mt-2 h-36 w-3 rounded-full bg-slate-800">
-                <div className="relative h-full w-full rounded-full bg-gradient-to-t from-cyan-500/20 to-emerald-400/35">
-                  <div
-                    className="absolute left-1/2 h-3 w-3 -translate-x-1/2 rounded-full bg-emerald-300"
-                    style={{ bottom: `${raceProgress}%`, animation: 'neuro-pulse-dot 1.1s ease-out infinite' }}
-                  />
-                </div>
-              </div>
-              <p className="mt-2 text-xs font-semibold text-emerald-300">{Math.round(raceProgress)}%</p>
+            {/* Stability readout */}
+            <div className="absolute right-4 top-4 rounded-lg border border-slate-600/70 bg-slate-950/80 px-3 py-2 backdrop-blur-sm text-center">
+              <p className="text-[10px] tracking-[0.18em] text-slate-300">STABILITY</p>
+              <p className={`text-xl font-semibold mt-1 ${metrics.stability > 0.7 ? 'text-emerald-300' : metrics.stability > 0.45 ? 'text-amber-300' : 'text-red-300'}`}>
+                {Math.round(metrics.stability * 100)}%
+              </p>
             </div>
 
-            <div className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-slate-950 via-slate-950/95 to-transparent" />
+            {/* Horizon gradient */}
+            <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-slate-950 via-slate-950/90 to-transparent" />
 
+            {/* ── Rear-view car ──────────────────────────────────── */}
             <div
-              className="absolute bottom-9 transition-[left] duration-200"
-              style={{ left: `calc(50% - 30px + ${drift}px)` }}
+              className="absolute bottom-8 transition-[left] duration-150"
+              style={{ left: `calc(50% - 40px + ${rawDrift}px)` }}
+              key="car"
             >
-              <div className="relative h-16 w-[60px]" style={{ animation: `neuro-engine-thrum ${engineMs}ms ease-in-out infinite` }}>
-                <div className={`absolute left-1/2 top-0 h-4 -translate-x-1/2 rounded-full px-2 text-[10px] font-semibold tracking-wide ${edgeWarning ? 'bg-red-500/25 text-red-200' : 'bg-cyan-500/20 text-cyan-100'}`}>
-                  {edgeWarning ? 'EDGE' : 'LOCK'}
-                </div>
+              <div className="relative w-[80px]"
+                style={{ animation: `nd-engine ${engineMs}ms ease-in-out infinite` }}>
 
-                <div className="absolute bottom-0 left-1/2 h-[46px] w-[48px] -translate-x-1/2 rounded-xl border border-cyan-200/40 bg-gradient-to-b from-cyan-300 to-blue-700 shadow-[0_8px_22px_rgba(34,211,238,0.35)]">
-                  <div className="absolute inset-x-2 top-1.5 h-4 rounded-md bg-slate-100/70" />
-                  <div className="absolute bottom-1 left-1 h-3 w-3 rounded-full bg-slate-900 ring-1 ring-slate-500" />
-                  <div className="absolute bottom-1 right-1 h-3 w-3 rounded-full bg-slate-900 ring-1 ring-slate-500" />
-                </div>
+                {/* Edge warning label */}
+                {edgeWarning && (
+                  <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded-full bg-red-500/25 px-2 py-0.5 text-[10px] font-semibold text-red-200 whitespace-nowrap">
+                    OFF TRACK
+                  </div>
+                )}
 
-                <div
-                  className="absolute left-1/2 top-[46px] -z-10 w-5 -translate-x-1/2 rounded-b-full bg-gradient-to-b from-orange-200 via-amber-400 to-transparent"
-                  style={{ height: `${flameLength}px`, opacity: 0.55 + speedStrength * 0.35 }}
-                />
+                {/* Car body — rear view */}
+                <div className="relative mx-auto w-[72px]">
+                  {/* Spoiler */}
+                  <div className="absolute -top-1.5 inset-x-1 h-2 rounded-sm bg-slate-600 border border-slate-500/50" />
+                  {/* Main body */}
+                  <div className="relative h-[48px] rounded-t-xl rounded-b-lg border border-blue-600/40 bg-gradient-to-b from-blue-700 via-blue-800 to-blue-950 shadow-[0_8px_24px_rgba(37,99,235,0.4)]">
+                    {/* Rear window */}
+                    <div className="absolute inset-x-4 top-2 h-[16px] rounded-sm bg-slate-200/15 border border-slate-300/20" />
+                    {/* Tail lights */}
+                    <div className="absolute bottom-2 left-1 h-3 w-[18px] rounded-sm bg-red-500" style={{ boxShadow: '0 0 7px rgba(239,68,68,0.85)' }} />
+                    <div className="absolute bottom-2 right-1 h-3 w-[18px] rounded-sm bg-red-500" style={{ boxShadow: '0 0 7px rgba(239,68,68,0.85)' }} />
+                    {/* License plate */}
+                    <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 h-2 w-[28px] rounded-sm bg-white/75" />
+                  </div>
+                  {/* Wheels */}
+                  <div className="absolute -bottom-1 -left-2 h-5 w-5 rounded-full bg-slate-900 border-2 border-slate-600 ring-1 ring-slate-700/60" />
+                  <div className="absolute -bottom-1 -right-2 h-5 w-5 rounded-full bg-slate-900 border-2 border-slate-600 ring-1 ring-slate-700/60" />
+                  {/* Exhaust flames */}
+                  {speedFraction > 0.15 && (
+                    <div className="absolute left-1/2 top-full -z-10 w-5 -translate-x-1/2 rounded-b-full bg-gradient-to-b from-orange-200 via-amber-400 to-transparent"
+                      style={{ height: `${flameLength}px`, opacity: 0.5 + speedFraction * 0.4 }} />
+                  )}
+                </div>
               </div>
             </div>
 
-            {Array.from({ length: 7 }).map((_, index) => (
-              <div
-                key={index}
-                className="absolute left-1/2 h-6 w-[2px] -translate-x-1/2 rounded-full bg-cyan-200"
+            {/* Speed lines */}
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i}
+                className="absolute left-1/2 h-5 w-[2px] -translate-x-1/2 rounded-full bg-cyan-200"
                 style={{
-                  bottom: `${22 + index * 10}%`,
-                  marginLeft: `${(index - 3) * 26 + drift * 0.22}px`,
-                  opacity: speedStrength * (0.14 + index * 0.05),
-                  animation: `neuro-speed-line ${Math.max(360 - speed, 90)}ms linear infinite`,
-                  animationDelay: `${index * 70}ms`,
+                  bottom: `${24 + i * 10}%`,
+                  marginLeft: `${(i - 2.5) * 28 + rawDrift * 0.18}px`,
+                  opacity: speedFraction * (0.12 + i * 0.05),
+                  animation: `nd-speed-line ${Math.max(380 - speedKmh, 90)}ms linear infinite`,
+                  animationDelay: `${i * 65}ms`,
                 }}
               />
             ))}
 
+            {/* Finish overlay */}
             {isFinished && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm">
-                <div className="rounded-xl border border-emerald-300/60 bg-emerald-500/15 px-6 py-4 text-center">
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm">
+                <div className="rounded-xl border border-emerald-300/60 bg-emerald-500/15 px-8 py-5 text-center">
                   <p className="text-xs tracking-[0.28em] text-emerald-200">LAP TIME</p>
                   <p className="mt-2 text-4xl font-semibold text-emerald-100">{lapTimeSeconds?.toFixed(2)}s</p>
                 </div>
@@ -429,22 +506,23 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
             )}
           </div>
 
+          {/* Stats strip */}
           <div className="relative z-10 mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
             <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-cyan-200">Speed Load</p>
-              <p className="mt-1 text-lg font-semibold text-cyan-100">{Math.round(speedStrength * 100)}%</p>
+              <p className="text-xs uppercase tracking-wide text-cyan-200">Speed</p>
+              <p className="mt-1 text-lg font-semibold text-cyan-100">{speedKmh} km/h</p>
             </div>
             <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-emerald-200">Track Stability</p>
-              <p className="mt-1 text-lg font-semibold text-emerald-100">{Math.round(metrics.stability * 100)}%</p>
+              <p className="text-xs uppercase tracking-wide text-emerald-200">Track Progress</p>
+              <p className="mt-1 text-lg font-semibold text-emerald-100">{Math.round(raceProgress * 100)}%</p>
             </div>
-            <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-violet-200">Control</p>
-              <p className="mt-1 text-lg font-semibold text-violet-100">{Math.round(metrics.control * 100)}%</p>
+            <div className={`rounded-xl border p-3 ${metrics.stability > 0.7 ? 'border-emerald-400/30 bg-emerald-500/10' : metrics.stability > 0.45 ? 'border-amber-400/30 bg-amber-500/10' : 'border-red-400/30 bg-red-500/10'}`}>
+              <p className={`text-xs uppercase tracking-wide ${metrics.stability > 0.7 ? 'text-emerald-200' : metrics.stability > 0.45 ? 'text-amber-200' : 'text-red-200'}`}>Stability</p>
+              <p className={`mt-1 text-lg font-semibold ${metrics.stability > 0.7 ? 'text-emerald-100' : metrics.stability > 0.45 ? 'text-amber-100' : 'text-red-100'}`}>{Math.round(metrics.stability * 100)}%</p>
             </div>
             <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-amber-200">Distance Left</p>
-              <p className="mt-1 text-lg font-semibold text-amber-100">{remainingMeters} m</p>
+              <p className="text-xs uppercase tracking-wide text-amber-200">Remaining</p>
+              <p className="mt-1 text-lg font-semibold text-amber-100">{remainingPct}%</p>
             </div>
           </div>
         </div>
@@ -520,131 +598,135 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
   const waveMin = Math.min(...wavePoints, 0);
   const waveMax = Math.max(...wavePoints, 1);
   const waveRange = Math.max(waveMax - waveMin, 1);
-  const normalizedWave = wavePoints.map((value) => clamp((value - waveMin) / waveRange));
-  const smoothedWave = normalizedWave.map((_, index) => {
-    const start = Math.max(index - 2, 0);
-    const end = Math.min(index + 3, normalizedWave.length);
-    return average(normalizedWave.slice(start, end));
+  const normalizedWave = wavePoints.map((v) => clamp((v - waveMin) / waveRange));
+  const smoothedWave = normalizedWave.map((_, i) => {
+    const s = Math.max(i - 2, 0);
+    const e = Math.min(i + 3, normalizedWave.length);
+    return average(normalizedWave.slice(s, e));
   });
-  const svgH = 220;
+  const svgH = 200;
   const svgW = 520;
-  const linePoints = smoothedWave.map((value, index) => {
-    const x = (index / Math.max(smoothedWave.length - 1, 1)) * svgW;
-    const y = svgH - value * (svgH - 24) - 12;
-    return { x, y };
-  });
-  const linePath = linePoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+  const linePoints = smoothedWave.map((v, i) => ({
+    x: (i / Math.max(smoothedWave.length - 1, 1)) * svgW,
+    y: svgH - v * (svgH - 24) - 12,
+  }));
+  const linePath = linePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
   const areaPath = `${linePath} L ${svgW} ${svgH - 10} L 0 ${svgH - 10} Z`;
-  const latestAmplitude = smoothedWave.length ? smoothedWave[smoothedWave.length - 1] : 0.5;
   const coherence = clamp(metrics.ppgRegulation * 0.7 + metrics.calm * 0.3);
   const regulationColor = metrics.ppgRegulation > 0.72 ? '#fb7185' : metrics.ppgRegulation > 0.45 ? '#f59e0b' : '#94a3b8';
-  const coreScale = 0.84 + latestAmplitude * 0.38 + metrics.ppgRegulation * 0.22;
-  const ringOpacity = 0.2 + coherence * 0.55;
+  const stabilityLabel = metrics.ppgRegulation > 0.72 ? 'Smooth — excellent coherence' : metrics.ppgRegulation > 0.45 ? 'Moderate — keep breathing slowly' : 'Irregular — slow your breath';
   let peakCount = 0;
-  for (let i = 1; i < smoothedWave.length - 1; i += 1) {
-    if (smoothedWave[i] > smoothedWave[i - 1] && smoothedWave[i] > smoothedWave[i + 1] && smoothedWave[i] > 0.68) peakCount += 1;
+  for (let i = 1; i < smoothedWave.length - 1; i++) {
+    if (smoothedWave[i] > smoothedWave[i - 1] && smoothedWave[i] > smoothedWave[i + 1] && smoothedWave[i] > 0.68) peakCount++;
   }
-  const pulseDensity = Math.min(peakCount, 24);
+  const estBpm = Math.round((peakCount / 3) * 60); // 3s window
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-4 rounded-2xl border border-rose-400/40 bg-gradient-to-b from-rose-500/10 via-slate-950 to-slate-950 p-6">
+    <div className="mx-auto w-full max-w-4xl space-y-4 rounded-2xl border border-rose-400/40 bg-gradient-to-b from-rose-500/8 via-slate-950 to-slate-950 p-6">
       <style>{`
-        @keyframes pulse-core {
-          0%, 100% { transform: scale(0.94); }
-          50% { transform: scale(1.08); }
+        @keyframes pp-breathe {
+          0%       { transform: scale(0.55); background: rgba(96,165,250,0.25); }
+          33%      { transform: scale(1.05); background: rgba(96,165,250,0.60); }
+          42%      { transform: scale(1.05); background: rgba(167,139,250,0.60); }
+          92%      { transform: scale(0.55); background: rgba(167,139,250,0.25); }
+          100%     { transform: scale(0.55); background: rgba(96,165,250,0.25); }
         }
-        @keyframes pulse-ring {
+        @keyframes pp-ring {
           from { transform: scale(0.8); opacity: 0.5; }
-          to { transform: scale(1.55); opacity: 0; }
+          to   { transform: scale(1.6); opacity: 0; }
         }
-        @keyframes pulse-scan {
-          from { transform: translateX(-100%); }
-          to { transform: translateX(100%); }
+        @keyframes pp-label-inhale {
+          0%,2%  { opacity:1 } 33%,100% { opacity:0 }
+        }
+        @keyframes pp-label-hold1 {
+          0%,32%  { opacity:0 } 34%,41% { opacity:1 } 43%,100% { opacity:0 }
+        }
+        @keyframes pp-label-exhale {
+          0%,41%  { opacity:0 } 43%,90% { opacity:1 } 92%,100% { opacity:0 }
+        }
+        @keyframes pp-label-hold2 {
+          0%,91%  { opacity:0 } 93%,99% { opacity:1 } 100%      { opacity:0 }
         }
       `}</style>
 
-      <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
-        <div className="relative overflow-hidden rounded-xl border border-rose-300/30 bg-slate-900/70 p-4 text-center">
-          <p className="text-xs uppercase tracking-[0.22em] text-rose-200">Pulse Core</p>
-          <div className="relative mx-auto mt-5 h-44 w-44">
-            <div
-              className="absolute inset-0 rounded-full border border-rose-300/30"
-              style={{ animation: 'pulse-ring 1.4s ease-out infinite', opacity: ringOpacity }}
-            />
-            <div
-              className="absolute inset-4 rounded-full border border-rose-300/25"
-              style={{ animation: 'pulse-ring 1.4s ease-out 0.35s infinite', opacity: ringOpacity * 0.9 }}
-            />
-            <div
-              className="absolute inset-8 rounded-full bg-[radial-gradient(circle,rgba(251,113,133,0.95),rgba(157,23,77,0.7)_60%,rgba(15,23,42,0.95)_100%)]"
-              style={{
-                transform: `scale(${coreScale})`,
-                animation: `pulse-core ${Math.max(1200 - pulseDensity * 28, 420)}ms ease-in-out infinite`,
-                boxShadow: `0 0 48px rgba(251,113,133,${0.3 + coherence * 0.35})`,
-              }}
-            />
+      <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+        {/* Breathing pacer */}
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-rose-300/30 bg-slate-900/70 p-4">
+          <p className="text-xs uppercase tracking-[0.22em] text-rose-200">Breathing Guide</p>
+          <div className="relative flex h-40 w-40 items-center justify-center">
+            {/* Outer expand ring */}
+            <div className="absolute inset-0 rounded-full border border-rose-300/25"
+              style={{ animation: `pp-ring 12s linear ${33 / 100 * 12}s infinite`, opacity: coherence * 0.5 }} />
+            {/* Breathing circle */}
+            <div className="absolute inset-6 rounded-full"
+              style={{ animation: 'pp-breathe 12s ease-in-out infinite',
+                boxShadow: `0 0 32px rgba(251,113,133,${0.2 + coherence * 0.4})` }} />
+            {/* Phase labels — fade in/out in sync */}
+            <div className="relative z-10 text-center select-none">
+              <p className="text-xs font-semibold text-blue-200" style={{ animation: 'pp-label-inhale 12s ease-in-out infinite' }}>Inhale</p>
+              <p className="text-xs font-semibold text-purple-300 absolute top-0 left-0 right-0" style={{ animation: 'pp-label-hold1 12s ease-in-out infinite' }}>Hold</p>
+              <p className="text-xs font-semibold text-purple-200 absolute top-0 left-0 right-0" style={{ animation: 'pp-label-exhale 12s ease-in-out infinite' }}>Exhale</p>
+              <p className="text-xs font-semibold text-blue-300 absolute top-0 left-0 right-0" style={{ animation: 'pp-label-hold2 12s ease-in-out infinite' }}>Hold</p>
+            </div>
           </div>
-          <p className="mt-4 text-xs text-slate-300">Beat Activity</p>
-          <p className="text-3xl font-semibold text-rose-100">{pulseDensity}</p>
+          <p className="text-[10px] text-center text-slate-400">
+            4s inhale · 1s hold · 6s exhale · 1s hold
+          </p>
+          <div className="w-full rounded-lg border border-rose-600/30 bg-rose-900/20 px-3 py-2 text-xs text-rose-200 text-center">
+            {stabilityLabel}
+          </div>
         </div>
 
+        {/* PPG waveform */}
         <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
-          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(248,113,113,0.08),rgba(15,23,42,0.95))]" />
+          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(248,113,113,0.06),rgba(15,23,42,0.95))]" />
           <p className="absolute left-3 top-2 text-xs uppercase tracking-[0.2em] text-slate-400">Heart Rhythm Stream</p>
           {linePoints.length > 2 ? (
-            <svg viewBox={`0 0 ${svgW} ${svgH}`} className="h-56 w-full" preserveAspectRatio="none">
+            <svg viewBox={`0 0 ${svgW} ${svgH}`} className="h-52 w-full" preserveAspectRatio="none">
               <defs>
-                <linearGradient id="pulseArea" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stopColor="rgba(251,113,133,0.45)" />
+                <linearGradient id="ppArea" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stopColor="rgba(251,113,133,0.40)" />
                   <stop offset="100%" stopColor="rgba(251,113,133,0)" />
                 </linearGradient>
-                <pattern id="pulseGrid" width="36" height="22" patternUnits="userSpaceOnUse">
-                  <path d="M 36 0 L 0 0 0 22" fill="none" stroke="rgba(148,163,184,0.16)" strokeWidth="1" />
+                <pattern id="ppGrid" width="36" height="22" patternUnits="userSpaceOnUse">
+                  <path d="M 36 0 L 0 0 0 22" fill="none" stroke="rgba(148,163,184,0.14)" strokeWidth="1" />
                 </pattern>
               </defs>
-              <rect width={svgW} height={svgH} fill="url(#pulseGrid)" />
-              <path d={areaPath} fill="url(#pulseArea)" />
-              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" opacity="0.18" />
-              <circle
-                cx={linePoints[linePoints.length - 1]?.x}
-                cy={linePoints[linePoints.length - 1]?.y}
-                r={4}
-                fill={regulationColor}
-                style={{ filter: 'drop-shadow(0 0 8px rgba(251,113,133,0.65))' }}
-              />
+              <rect width={svgW} height={svgH} fill="url(#ppGrid)" />
+              <path d={areaPath} fill="url(#ppArea)" />
+              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" opacity="0.15" />
+              <circle cx={linePoints[linePoints.length - 1]?.x} cy={linePoints[linePoints.length - 1]?.y} r={4}
+                fill={regulationColor} style={{ filter: 'drop-shadow(0 0 7px rgba(251,113,133,0.65))' }} />
             </svg>
           ) : (
-            <div className="flex h-56 items-center justify-center text-sm text-slate-500">Waiting for PPG data...</div>
+            <div className="flex h-52 items-center justify-center text-sm text-slate-500">Waiting for PPG data…</div>
           )}
-          <div
-            className="pointer-events-none absolute inset-y-0 w-14 bg-gradient-to-r from-transparent via-rose-200/20 to-transparent"
-            style={{ animation: `pulse-scan ${Math.max(2200 - pulseDensity * 60, 700)}ms linear infinite` }}
-          />
         </div>
       </div>
 
+      {/* Stats */}
       <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
         <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
-          Heart Rhythm Stability<br />
-          <span className="text-xl text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</span>
-          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-rose-400 transition-all duration-300" style={{ width: `${Math.round(metrics.ppgRegulation * 100)}%` }} /></div>
-          <p className="mt-1 text-xs text-gray-500">Smoother pulse = better vagal tone</p>
+          <p className="text-xs text-gray-400">HRV Coherence</p>
+          <p className="mt-1 text-xl font-semibold text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</p>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-800">
+            <div className="h-full rounded-full bg-rose-400 transition-all duration-300" style={{ width: `${Math.round(metrics.ppgRegulation * 100)}%` }} />
+          </div>
+          <p className="mt-1 text-xs text-gray-500">Smoother = better vagal tone</p>
         </div>
         <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
-          Neural Calmness<br />
-          <span className="text-xl text-rose-300">{Math.round(metrics.calm * 100)}%</span>
-          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-pink-400 transition-all duration-300" style={{ width: `${Math.round(metrics.calm * 100)}%` }} /></div>
+          <p className="text-xs text-gray-400">Neural Calm</p>
+          <p className="mt-1 text-xl font-semibold text-pink-300">{Math.round(metrics.calm * 100)}%</p>
+          <div className="mt-2 h-1.5 rounded-full bg-gray-800">
+            <div className="h-full rounded-full bg-pink-400 transition-all duration-300" style={{ width: `${Math.round(metrics.calm * 100)}%` }} />
+          </div>
         </div>
         <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
-          Nervous System Control<br />
-          <span className="text-xl text-rose-300">{Math.round(metrics.control * 100)}%</span>
-          <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-orange-400 transition-all duration-300" style={{ width: `${Math.round(metrics.control * 100)}%` }} /></div>
+          <p className="text-xs text-gray-400">Est. Heart Rate</p>
+          <p className="mt-1 text-xl font-semibold text-orange-300">{estBpm > 0 ? `${estBpm} bpm` : '—'}</p>
+          <p className="mt-3 text-xs text-gray-500">Target: 50–70 bpm during exercise</p>
         </div>
-      </div>
-
-      <div className="rounded-lg border border-rose-600/40 bg-rose-900/20 p-3 text-xs text-rose-200">
-        <strong>What is happening:</strong> You are training vagal tone, the ability of your parasympathetic nervous system to regulate heart-rate variability. The pulse core and waveform become cleaner when your nervous system response is more stable.
       </div>
     </div>
   );
@@ -673,6 +755,8 @@ export default function CognitiveTrainingView({
   const [peakValue, setPeakValue] = useState(0);
   const [lapTimeSeconds, setLapTimeSeconds] = useState<number | null>(null);
   const lapTimeRef = useRef<number | null>(null);
+  const distanceCoveredRef = useRef(0);
+  const lastMetricsUpdateRef = useRef(Date.now());
   const metrics = useMemo(() => calculateBrainMetrics(eegData, ppgData, predictedVAD), [eegData, ppgData, predictedVAD]);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -686,8 +770,23 @@ export default function CognitiveTrainingView({
     if (phase !== 'running') return;
 
     const newProgress = (() => {
-      if (selectedActivity === 'neural-ball') return clamp(metrics.focus * 0.55 + metrics.calm * 0.45);
-      if (selectedActivity === 'neuro-drive') return clamp(metrics.focus * 0.7 + metrics.control * 0.3);
+      // Neural ball: geometric mean — BOTH focus and calm must be high
+      if (selectedActivity === 'neural-ball') {
+        return clamp(Math.sqrt(metrics.focus * metrics.calm));
+      }
+      // Neuro drive: accumulate distance over time based on focus speed
+      if (selectedActivity === 'neuro-drive') {
+        const now = Date.now();
+        const dt = Math.min((now - lastMetricsUpdateRef.current) / 1000, 0.5);
+        lastMetricsUpdateRef.current = now;
+        const speedFraction = clamp(metrics.focus * 0.7 + metrics.control * 0.3);
+        const trackSpeed = 1.0 / (durationMinutes * 60 * 0.6);
+        distanceCoveredRef.current = Math.min(
+          distanceCoveredRef.current + speedFraction * trackSpeed * dt,
+          1.0,
+        );
+        return distanceCoveredRef.current;
+      }
       if (selectedActivity === 'signal-shield') return clamp(metrics.symmetry * 0.5 + metrics.stability * 0.5);
       return clamp(metrics.ppgRegulation * 0.55 + metrics.calm * 0.25 + metrics.control * 0.2);
     })();
@@ -752,6 +851,10 @@ export default function CognitiveTrainingView({
     setPeakValue(0);
     setProgressValue(0.25);
     setRemainingSeconds(durationMinutes * 60);
+    distanceCoveredRef.current = 0;
+    lastMetricsUpdateRef.current = Date.now();
+    lapTimeRef.current = null;
+    setLapTimeSeconds(null);
     setPhase('running');
   };
 

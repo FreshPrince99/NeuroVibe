@@ -10,6 +10,7 @@ export interface SongRecord {
   artist: string;
   genre: string;
   uri: string;
+  coverUrl?: string;
   emotions: string[];           // all emotion labels captured during this song
   dominantEmotion: string;      // most frequent emotion
   avgValence: number;           // 0-1 (from VAD)
@@ -75,12 +76,22 @@ export function initSession(mode: SessionMode): void {
 
 /** Finalize a completed song and push it into the session. Called by EmotionView when the track changes. */
 export function pushSongRecord(record: Omit<SongRecord, 'dominantEmotion' | 'score'>): void {
+  // Ignore trivially short flushes (SDK transition artefacts under 3 seconds)
+  if (record.listeningSeconds < 3) return;
+
   const freq: Record<string, number> = {};
   for (const e of record.emotions) freq[e] = (freq[e] ?? 0) + 1;
   const dominantEmotion = Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'neutral';
-
-  // Score = how well the song matched the session goal
   const score = computeSongScore(record.emotions, record.avgValence, _session.mode, record.likeDislikeLabel);
+
+  // Deduplicate: if this URI was already recorded, keep the entry with more listening time
+  const existingIdx = _session.songs.findIndex(s => s.uri === record.uri);
+  if (existingIdx !== -1) {
+    if (record.listeningSeconds > _session.songs[existingIdx].listeningSeconds) {
+      _session.songs[existingIdx] = { ...record, dominantEmotion, score };
+    }
+    return;
+  }
 
   _session.songs.push({ ...record, dominantEmotion, score });
 }

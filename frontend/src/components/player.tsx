@@ -14,12 +14,12 @@ interface Track {
 interface PlayerProps {
   emotion: string;
   valence?: { valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number } | null;
-  onTrackChange?: (track: { name: string; artist: string; uri: string; genre: string } | null) => void;
+  onTrackChange?: (track: { name: string; artist: string; uri: string; genre: string; albumArt?: string } | null) => void;
 }
 
 export interface PlayerRef {
   pause: () => void;
-  getCurrentTrack: () => { name: string; artist: string; uri: string; genre: string } | null;
+  getCurrentTrack: () => { name: string; artist: string; uri: string; genre: string; albumArt?: string } | null;
 }
 
 type SessionMode = "focus" | "relaxation" | "cognitive";
@@ -125,6 +125,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
   const activeTrackUriRef = useRef<string>("");
   const trackEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasStartedPlaybackRef = useRef(false);
+  const sessionStartedRef = useRef(false);   // true after our first track plays
 
   // Keep a rolling history of recently played URIs so the same song is never
   // immediately re-selected. Capped at 15 entries.
@@ -158,7 +159,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
   useImperativeHandle(ref, () => ({
     getCurrentTrack: () => {
       if (!currentTrack) return null;
-      return { name: currentTrack.name, artist: currentTrack.artist, uri: currentTrack.uri, genre: currentGenreRef.current };
+      return { name: currentTrack.name, artist: currentTrack.artist, uri: currentTrack.uri, genre: currentGenreRef.current, albumArt: currentTrack.albumArt };
     },
     pause: () => {
       if (player && isPlaying) {
@@ -357,7 +358,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
     // Record this URI in the history (cap at 15) so it won't be chosen next time.
     playedUrisRef.current.push(chosenTrack.uri);
     if (playedUrisRef.current.length > 15) playedUrisRef.current.shift();
-
+    sessionStartedRef.current = true;
     emotionCountsRef.current = {};
     return true;
   // deviceId, accessToken, adaptive refs read via refs — intentionally excluded from deps.
@@ -553,14 +554,9 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
   useEffect(() => {
     if (!accessToken) return;
 
-    const script = document.createElement("script");
-    script.src = "https://sdk.scdn.co/spotify-player.js";
-    script.async = true;
-    document.body.appendChild(script);
-
     let spotifyPlayer: SpotifyPlayer | null = null;
 
-    window.onSpotifyWebPlaybackSDKReady = () => {
+    const initializeSpotifyPlayer = () => {
       const sp: SpotifyPlayer = new window.Spotify.Player({
         name: "NeuroVibe Player",
         // Always read from the ref so the SDK gets a fresh token after refresh.
@@ -591,7 +587,9 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
             clearTimeout(trackEndTimerRef.current);
             trackEndTimerRef.current = null;
           }
-          onTrackChange?.({ name: track.name, artist: track.artists.map((a: SpotifyArtist) => a.name).join(", "), uri: track.uri, genre: currentGenreRef.current });
+          if (sessionStartedRef.current) {
+            onTrackChange?.({ name: track.name, artist: track.artists.map((a: SpotifyArtist) => a.name).join(", "), uri: track.uri, genre: currentGenreRef.current, albumArt: track.album.images[0]?.url });
+          }
         }
 
         setCurrentTrack({
@@ -644,9 +642,29 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
       });
 
       setPlayer(sp);
-    };
+    }; // end initializeSpotifyPlayer
+
+    // If the SDK script is already loaded from a previous session, call directly.
+    // Otherwise register the callback and inject the script (first load only).
+    if ((window as any).Spotify?.Player) {
+      initializeSpotifyPlayer();
+    } else {
+      window.onSpotifyWebPlaybackSDKReady = initializeSpotifyPlayer;
+      if (!document.querySelector('script[src="https://sdk.scdn.co/spotify-player.js"]')) {
+        const script = document.createElement("script");
+        script.src = "https://sdk.scdn.co/spotify-player.js";
+        script.async = true;
+        document.body.appendChild(script);
+      }
+    }
 
     return () => {
+      // Reset playback guards so the next SDK setup (StrictMode re-mount or new
+      // session) can kick off the first track fresh.
+      hasStartedPlaybackRef.current = false;
+      sessionStartedRef.current     = false;
+      activeTrackUriRef.current     = "";
+      endHandledForTrackRef.current = "";
       if (trackEndTimerRef.current) {
         clearTimeout(trackEndTimerRef.current);
         trackEndTimerRef.current = null;

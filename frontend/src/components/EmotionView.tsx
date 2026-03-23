@@ -32,7 +32,7 @@ interface EmotionViewProps {
   ppgAvailable?: boolean | null;
   onExitToHome?: () => void;
   onBackToHome?: () => void;  onStopSession?: () => void;  playerRef?: React.RefObject<PlayerRef | null>;
-  likeDislike?: { label: string; probability: number; confidence: number } | null;
+  valence?: { valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number } | null;
 }
 
 export default function EmotionView({ 
@@ -53,7 +53,7 @@ export default function EmotionView({
   onBackToHome,
   onStopSession,
   playerRef,
-  likeDislike,
+  valence,
 }: EmotionViewProps) {
   const [selectedEmotion, setSelectedEmotion] = useState<string>("happy");
   const [useMusePrediction, setUseMusePrediction] = useState<boolean>(isUsingMusePrediction);
@@ -64,7 +64,7 @@ export default function EmotionView({
   const songValencesRef = useRef<number[]>([]);
   const songStartTimeRef = useRef<number>(Date.now());
   const currentSongRef = useRef<{ name: string; artist: string; uri: string; genre: string } | null>(null);
-  const lastLikeDislikeRef = useRef<string | undefined>(undefined);
+  const lastValenceRef = useRef<string | undefined>(undefined);
 
   // Collect emotions while a song is playing
   useEffect(() => {
@@ -79,10 +79,10 @@ export default function EmotionView({
     }
   }, [predictedVAD]);
 
-  // Track latest like/dislike for current song
+  // Track latest NeuroSense valence for current song
   useEffect(() => {
-    if (likeDislike) lastLikeDislikeRef.current = likeDislike.label;
-  }, [likeDislike]);
+    if (valence && valence.valence !== "UNCERTAIN") lastValenceRef.current = valence.valence;
+  }, [valence]);
 
   const flushCurrentSong = useCallback(() => {
     if (!currentSongRef.current) return;
@@ -97,7 +97,7 @@ export default function EmotionView({
       emotions: [...songEmotionsRef.current],
       avgValence,
       listeningSeconds,
-      likeDislikeLabel: lastLikeDislikeRef.current,
+      likeDislikeLabel: lastValenceRef.current,
     });
   }, []);
 
@@ -109,7 +109,7 @@ export default function EmotionView({
     songEmotionsRef.current = [];
     songValencesRef.current = [];
     songStartTimeRef.current = Date.now();
-    lastLikeDislikeRef.current = undefined;
+    lastValenceRef.current = undefined;
   }, [flushCurrentSong]);
 
   const handleStopSession = useCallback(() => {
@@ -331,7 +331,7 @@ export default function EmotionView({
 
           {/* Right Side - Spotify Player */}
           <div className="flex flex-1 items-center justify-center border-l border-zinc-200 bg-white p-8 dark:border-zinc-800 dark:bg-zinc-950">
-            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} likeDislike={likeDislike} onTrackChange={handleTrackChange} />
+            <Player ref={playerRef} emotion={useMusePrediction && predictedEmotion ? predictedEmotion.toLowerCase() : selectedEmotion} valence={valence} onTrackChange={handleTrackChange} />
           </div>
         </div>
 

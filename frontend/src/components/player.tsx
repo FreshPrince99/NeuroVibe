@@ -13,7 +13,7 @@ interface Track {
 
 interface PlayerProps {
   emotion: string;
-  likeDislike?: { label: string; probability: number; confidence: number } | null;
+  valence?: { valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number } | null;
   onTrackChange?: (track: { name: string; artist: string; uri: string; genre: string } | null) => void;
 }
 
@@ -78,7 +78,7 @@ const GENRE_EXPLORATION_POOL = [
   "post-rock", "acoustic", "piano", "jazz", "electronic", "cinematic",
 ];
 
-const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTrackChange }, ref) => {
+const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackChange }, ref) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [player, setPlayer] = useState<SpotifyPlayer | null>(null);
@@ -114,11 +114,11 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
   // the SDK useEffect to re-run (which would call disconnect).
   const emotionRef     = useRef<string>(emotion);
   const deviceIdRef    = useRef<string>("");
-  const likeDislikeRef = useRef(likeDislike);
+  const valenceRef = useRef(valence);
 
   // Keep refs in sync on every render without causing re-renders.
-  emotionRef.current     = emotion;
-  likeDislikeRef.current = likeDislike;
+  emotionRef.current  = emotion;
+  valenceRef.current  = valence;
 
   const emotionCountsRef = useRef<Record<string, number>>({});
   const endHandledForTrackRef = useRef<string>("");
@@ -369,8 +369,11 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
     endHandledForTrackRef.current = trackUri;
 
     // ── Layer 1: adjust adaptive energy from this song's emotion proportions ──
-    const counts = emotionCountsRef.current;
-    const total  = Object.values(counts).reduce((s, n) => s + n, 0);
+    const counts   = emotionCountsRef.current;
+    const total    = Object.values(counts).reduce((s, n) => s + n, 0);
+    const prevEnergy = adaptiveEnergyRef.current;
+    let energyChangeReason = "drift toward baseline";
+
     if (total > 0) {
       const tiredRelaxedCount = Object.entries(counts)
         .filter(([k]) => tiredRelaxedEmotions.has(k))
@@ -385,9 +388,11 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
       let energy = adaptiveEnergyRef.current;
       if (stressedRatio > STRESS_THRESHOLD) {
         energy -= ENERGY_STEP;
+        energyChangeReason = `stress detected (${(stressedRatio * 100).toFixed(0)}%)`;
         console.log(`⚡ Layer 1: stressed=${(stressedRatio * 100).toFixed(0)}% → lower energy`);
       } else if (tiredRelaxedRatio > TIRED_RELAXED_THRESHOLD) {
         energy += ENERGY_STEP;
+        energyChangeReason = `tired/relaxed detected (${(tiredRelaxedRatio * 100).toFixed(0)}%)`;
         console.log(`⚡ Layer 1: tired/relaxed=${(tiredRelaxedRatio * 100).toFixed(0)}% → raise energy`);
       } else {
         // Gently nudge back toward the user's baseline preference
@@ -398,48 +403,59 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
     }
 
     // ── Layer 2: track genre affect, rotate every GENRE_BLOCK_SIZE songs ──
-    // Use the label ("like"/"dislike") rather than the raw probability.
-    // The isotonic calibrator can collapse all probabilities to a single value
-    // (e.g. 0.475) making a numeric threshold useless. The label is the actual
-    // classification decision and is always binary.
-    const latestLD = likeDislikeRef.current;
-    if (latestLD != null) {
-      const dislikeScore = latestLD.label === "dislike" ? 1.0 : 0.0;
+    // Use NeuroSense valence: POSITIVE → 0.0 (like), NEGATIVE → 1.0 (dislike),
+    // UNCERTAIN → skip (don't contribute to block score).
+    // A full-UNCERTAIN block leaves blockAffectRef empty → avgScore stays 0 → keep genre.
+    const prevGenre = currentGenreRef.current;
+    const latestV   = valenceRef.current;
+    if (latestV != null && latestV.valence !== "UNCERTAIN") {
+      const dislikeScore = latestV.valence === "NEGATIVE" ? 1.0 : 0.0;
       blockAffectRef.current.push(dislikeScore);
       console.log(
-        `[Layer 2] song ${songsPlayedRef.current + 1}: label=${latestLD.label}` +
-        ` prob=${latestLD.probability.toFixed(3)} → score=${dislikeScore}` +
+        `[Layer 2] song ${songsPlayedRef.current + 1}: valence=${latestV.valence}` +
+        ` smooth=${latestV.smoothed_score.toFixed(3)} → score=${dislikeScore}` +
         ` (block ${blockAffectRef.current.length}/${GENRE_BLOCK_SIZE})`
       );
     } else {
-      console.log(`[Layer 2] song ${songsPlayedRef.current + 1}: no likeDislike signal — skipping`);
+      console.log(
+        `[Layer 2] song ${songsPlayedRef.current + 1}: ` +
+        `${latestV == null ? "no valence signal" : "UNCERTAIN"} — skipping`
+      );
     }
     songsPlayedRef.current += 1;
+
+    // Snapshot block state before evaluation may clear it
+    const blockScoresSnapshot = [...blockAffectRef.current];
+    let blockComplete    = false;
+    let blockAvgScore    = 0;
+    let genreRotated     = false;
 
     if (
       songsPlayedRef.current % GENRE_BLOCK_SIZE === 0 &&
       blockAffectRef.current.length > 0
     ) {
-      const avgScore =
+      blockAvgScore =
         blockAffectRef.current.reduce((s, p) => s + p, 0) /
         blockAffectRef.current.length;
       blockAffectRef.current = [];
+      blockComplete = true;
 
       console.log(
         `[Layer 2] block complete (${songsPlayedRef.current} songs):` +
-        ` avgDislikeScore=${avgScore.toFixed(2)} genre="${currentGenreRef.current}"`
+        ` avgDislikeScore=${blockAvgScore.toFixed(2)} genre="${currentGenreRef.current}"`
       );
 
-      if (avgScore >= 0.5) {
+      if (blockAvgScore >= 0.5) {
         // Majority of block was disliked → rotate genre
         const next = genreQueueRef.current.shift();
         if (next) {
           const prev = currentGenreRef.current;
           genreQueueRef.current.push(prev); // cycle old genre to back of queue
           currentGenreRef.current = next;
+          genreRotated = true;
           console.log(
             `[Layer 2] GENRE SHIFT: "${prev}" → "${next}"` +
-            ` (avgDislikeScore=${avgScore.toFixed(2)}, ${Math.round(avgScore * GENRE_BLOCK_SIZE)}/${GENRE_BLOCK_SIZE} dislikes)`
+            ` (avgDislikeScore=${blockAvgScore.toFixed(2)}, ${Math.round(blockAvgScore * GENRE_BLOCK_SIZE)}/${GENRE_BLOCK_SIZE} dislikes)`
           );
           // Show notification in the UI for 5 seconds
           if (genreShiftTimerRef.current) clearTimeout(genreShiftTimerRef.current);
@@ -451,12 +467,39 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
       } else {
         console.log(
           `[Layer 2] keeping genre "${currentGenreRef.current}"` +
-          ` (avgDislikeScore=${avgScore.toFixed(2)}, positive affect)`
+          ` (avgDislikeScore=${blockAvgScore.toFixed(2)}, positive affect)`
         );
       }
     }
 
     const dominantEmotion = getDominantEmotion();
+
+    // ── Fire song-switch report to backend terminal (fire-and-forget) ────────
+    fetch("http://localhost:5000/song_switch", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        song_number:          songsPlayedRef.current,
+        mode,
+        dominant_emotion:     dominantEmotion,
+        emotion_breakdown:    { ...counts },
+        emotion_total:        total,
+        prev_energy:          parseFloat(prevEnergy.toFixed(3)),
+        new_energy:           parseFloat(adaptiveEnergyRef.current.toFixed(3)),
+        energy_change_reason: energyChangeReason,
+        valence_label:        latestV?.valence ?? "N/A",
+        valence_score:        latestV?.smoothed_score ?? null,
+        valence_windows:      latestV?.n_windows ?? 0,
+        block_scores:         blockScoresSnapshot,
+        block_size:           GENRE_BLOCK_SIZE,
+        block_complete:       blockComplete,
+        block_avg_score:      blockComplete ? parseFloat(blockAvgScore.toFixed(3)) : null,
+        genre_rotated:        genreRotated,
+        prev_genre:           prevGenre,
+        current_genre:        currentGenreRef.current,
+      }),
+    }).catch(() => { /* non-fatal — backend may not be ready */ });
+
     const started = await playTrackForEmotionSummary(dominantEmotion);
     if (!started) {
       console.warn("[Player] Failed to start next track — will retry on next emotion update.");
@@ -466,7 +509,7 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, likeDislike, onTra
         }
       }, 15_000);
     }
-  }, [getDominantEmotion, playTrackForEmotionSummary]);
+  }, [getDominantEmotion, playTrackForEmotionSummary, mode]);
 
   // Proactively refresh the Spotify token ~5 min before it expires.
   useEffect(() => {

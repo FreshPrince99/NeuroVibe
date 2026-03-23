@@ -13,7 +13,7 @@ export interface SongRecord {
   emotions: string[];           // all emotion labels captured during this song
   dominantEmotion: string;      // most frequent emotion
   avgValence: number;           // 0-1 (from VAD)
-  likeDislikeLabel?: string;    // 'like' | 'dislike'
+  likeDislikeLabel?: string;    // 'POSITIVE' | 'NEGATIVE'
   listeningSeconds: number;     // how long it played
   /** 0-1: how well it served the session goal */
   score: number;
@@ -137,7 +137,7 @@ function computeSongScore(
   const ratio = (positiveCount - negativeCount * 0.5) / emotions.length;
 
   const valenceBonus = mode === 'relaxation' ? (1 - avgValence) * 0.2 : avgValence * 0.2;
-  const likeBonus = likeLabel === 'like' ? 0.15 : likeLabel === 'dislike' ? -0.15 : 0;
+  const likeBonus = likeLabel === 'POSITIVE' ? 0.15 : likeLabel === 'NEGATIVE' ? -0.15 : 0;
 
   return Math.max(0, Math.min(1, 0.5 + ratio * 0.5 + valenceBonus + likeBonus));
 }

@@ -10,7 +10,7 @@ from CNN_prediction import CNNEmotionPredictor
 from LSTM_prediction import LSTMEmotionPredictor
 from KAN_prediction import EmotionPredictor as KANEmotionPredictor
 from emotion import RuleBasedEmotionPredictor
-from likedislike import LikeDislikePredictor, USER_PKL
+from neurosense import NeuroSensePredictor
 import numpy as np
 import os
 import sys
@@ -20,6 +20,9 @@ import threading
 import time
 from collections import Counter
 from typing import Optional
+
+# Path where the baseline for the rule-based emotion predictor is persisted
+BASELINE_PKL = os.path.join(os.path.dirname(__file__), "baseline.pkl")
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='EEG Emotion Prediction WebSocket Server')
@@ -55,28 +58,28 @@ try:
             label_encoder_path='models/label_encoder.pkl'
         )
     else:  # rule (default)
-        # Load baseline from user.pkl if it exists so the emotion
+        # Load baseline from baseline.pkl if it exists so the emotion
         # classifier starts with personalised thresholds immediately.
         _rule_baseline = None
-        if os.path.exists(USER_PKL):
+        if os.path.exists(BASELINE_PKL):
             try:
-                with open(USER_PKL, "rb") as _fh:
-                    _udata = pickle.load(_fh)
-                if isinstance(_udata, dict) and "baseline_for_emotion" in _udata:
-                    _b = np.asarray(_udata["baseline_for_emotion"])  # (4, N)
+                with open(BASELINE_PKL, "rb") as _fh:
+                    _bdata = pickle.load(_fh)
+                if isinstance(_bdata, dict) and "baseline_for_emotion" in _bdata:
+                    _b = np.asarray(_bdata["baseline_for_emotion"])  # (4, N)
                     _rule_baseline = {
                         "tp9":  _b[0], "af7": _b[1],
                         "af8":  _b[2], "tp10": _b[3],
                     }
-                    print(f"[OK] Loaded baseline_for_emotion from user.pkl "
+                    print(f"[OK] Loaded baseline_for_emotion from baseline.pkl "
                           f"(shape={_b.shape}) for personalised emotion thresholds")
                 else:
-                    print("[INFO] user.pkl exists but has no baseline_for_emotion "
+                    print("[INFO] baseline.pkl exists but has no baseline_for_emotion "
                           "-- emotion classifier will use generic thresholds")
             except Exception as _e:
-                print(f"[WARN] Could not load user.pkl for emotion baseline: {_e}")
+                print(f"[WARN] Could not load baseline.pkl for emotion baseline: {_e}")
         else:
-            print("[INFO] No user.pkl found -- emotion classifier using generic thresholds")
+            print("[INFO] No baseline.pkl found -- emotion classifier using generic thresholds")
         predictor = RuleBasedEmotionPredictor(baseline_channels=_rule_baseline)
     print(f"✓ {MODEL_TYPE} Predictor ready!")
 except Exception as e:
@@ -86,25 +89,26 @@ except Exception as e:
 # Global baseline channels (populated during calibration) for personalising rule-based emotion predictor
 baseline_channels_global: Optional[dict] = None
 
-# Initialize Like/Dislike predictor (non-fatal if models are missing)
-print("Initializing Like/Dislike Predictor...")
+# Initialize NeuroSense valence predictor (non-fatal if models are missing)
+print("Initializing NeuroSense Valence Predictor...")
 try:
-    ld_predictor = LikeDislikePredictor()
+    ns_predictor = NeuroSensePredictor()
+    print("✓ NeuroSense Predictor ready!")
 except Exception as e:
-    print(f"⚠️  Like/Dislike predictor unavailable: {e}")
-    ld_predictor = None
+    print(f"⚠️  NeuroSense predictor unavailable: {e}")
+    ns_predictor = None
 
 # Global buffers for EEG and PPG samples
 eeg_buffer = []
 ppg_buffer: list = []   # raw PPG float values (~64 Hz, Muse 2)
-ld_buffer:  list = []   # separate 4-s window buffer for like/dislike (1024 samples)
-BUFFER_SIZE = predictor.required_samples
-LD_BUFFER_SIZE = 1024   # 4 s @ 256 Hz — matches model window
-SAMPLE_RATE = 256
-is_processing = False  # Flag to prevent multiple simultaneous predictions
-ld_is_processing = False
-ld_last_emit_time: float = 0.0  # epoch time of last likedislike_prediction emit
-LD_EMIT_INTERVAL = 4.0          # seconds between badge updates (~every 4s)
+ns_buffer:  list = []   # separate 4-s window buffer for valence (1024 samples @ 256 Hz)
+BUFFER_SIZE    = predictor.required_samples
+NS_BUFFER_SIZE = 1024   # 4 s @ 256 Hz — matches NeuroSense window
+SAMPLE_RATE    = 256
+is_processing    = False  # Flag to prevent multiple simultaneous predictions
+ns_is_processing = False
+ns_last_emit_time: float = 0.0  # epoch time of last valence_prediction emit
+NS_EMIT_INTERVAL  = 4.0         # seconds between badge updates (~every 4 s)
 
 # Emotion log: list of (wall_clock_time, emotion_string) recorded each prediction
 emotion_log: list = []
@@ -146,12 +150,14 @@ def handle_connect():
 def handle_disconnect():
     """Handle client disconnection."""
     print('✗ Client disconnected')
-    global eeg_buffer, ppg_buffer, ld_buffer
+    global eeg_buffer, ppg_buffer, ns_buffer
     eeg_buffer = []
     ppg_buffer = []
-    ld_buffer  = []
+    ns_buffer  = []
     if args.model == 'rule':
         predictor.reset()  # clear prediction history
+    if ns_predictor:
+        ns_predictor.reset()  # clear valence smoothing buffer
 
 @socketio.on('ppg_sample')
 def handle_ppg_sample(data):
@@ -208,16 +214,16 @@ def handle_eeg_sample(data):
             'tp10': data['tp10'] if data['tp10'] is not None else 0.0,
             'timestamp': data.get('timestamp', 0),
         }
-        
-        # Add sample to both EEG and Like/Dislike buffers
-        eeg_buffer.append(cleaned_data)
-        ld_buffer.append(cleaned_data)
 
-        # ── Like/Dislike prediction (every 4-s window, non-blocking) ──────
-        if ld_predictor and len(ld_buffer) >= LD_BUFFER_SIZE and not ld_is_processing:
-            _run_ld_prediction(list(ld_buffer[:LD_BUFFER_SIZE]))
-            # Slide window by half to get more frequent predictions
-            del ld_buffer[:LD_BUFFER_SIZE // 2]
+        # Add sample to both EEG and NeuroSense valence buffers
+        eeg_buffer.append(cleaned_data)
+        ns_buffer.append(cleaned_data)
+
+        # ── NeuroSense valence prediction (every 4-s window, non-blocking) ──
+        if ns_predictor and len(ns_buffer) >= NS_BUFFER_SIZE and not ns_is_processing:
+            _run_ns_prediction(list(ns_buffer[:NS_BUFFER_SIZE]))
+            # Slide window by half (50% overlap) for more frequent predictions
+            del ns_buffer[:NS_BUFFER_SIZE // 2]
 
         # Log progress every 256 samples (1 second)
         if len(eeg_buffer) % 256 == 0:
@@ -373,15 +379,15 @@ def handle_eeg_sample(data):
         emit('error', {'message': str(e)})
         eeg_buffer = []
 
-def _run_ld_prediction(window_samples: list) -> None:
-    """Run like/dislike prediction in a background thread (fire-and-forget)."""
-    global ld_is_processing
-    if ld_is_processing or ld_predictor is None:
+def _run_ns_prediction(window_samples: list) -> None:
+    """Run NeuroSense valence prediction in a background thread (fire-and-forget)."""
+    global ns_is_processing
+    if ns_is_processing or ns_predictor is None:
         return
-    ld_is_processing = True
+    ns_is_processing = True
 
     def _predict():
-        global ld_is_processing, ld_last_emit_time
+        global ns_is_processing, ns_last_emit_time
         try:
             win = np.array(
                 [
@@ -392,41 +398,41 @@ def _run_ld_prediction(window_samples: list) -> None:
                 ],
                 dtype=np.float32,
             )
-            result = ld_predictor.predict(win)
-            label      = result.get('label', '?')
-            prob       = result.get('probability', 0.5)
-            raw_prob   = result.get('raw_probability', prob)
-            confidence = result.get('confidence', 0.0)
-            threshold  = result.get('threshold', 0.5)
-            calibrated = result.get('calibrated', False)
-            n_cal      = result.get('n_cal_windows', 0)
-            bar = '█' * max(1, int(confidence * 20))
-            side = '👍 LIKE   ' if label == 'like' else '👎 DISLIKE'
-            print(f"  {side}  raw={raw_prob:.3f}→iso={prob:.3f}  "
-                  f"conf={confidence:.2f} {bar}  thresh={threshold:.2f}  "
-                  f"{'✓ personalised' if calibrated else '⚠ generic'}  n_cal={n_cal}")
-            # Emit to frontend on every window (throttled by LD_EMIT_INTERVAL)
+            result   = ns_predictor.predict(win)
+            valence  = result["valence"]
+            smoothed = result["smoothed_score"]
+            raw      = result["raw_score"]
+            n_win    = result["n_windows"]
+
+            icon = "🟢 POS" if valence == "POSITIVE" else ("🔴 NEG" if valence == "NEGATIVE" else "⚪ UNC")
+            bar  = "█" * max(1, int((1 - abs(smoothed - 0.5) * 2) * 10))
+            print(f"  {icon}  raw={raw:.3f}  smooth={smoothed:.3f}  n={n_win}  {bar}")
+
+            # Emit to frontend (throttled by NS_EMIT_INTERVAL)
             now = time.time()
-            if now - ld_last_emit_time >= LD_EMIT_INTERVAL:
-                socketio.emit("likedislike_prediction", result)
-                ld_last_emit_time = now
+            if now - ns_last_emit_time >= NS_EMIT_INTERVAL:
+                socketio.emit("valence_prediction", result)
+                ns_last_emit_time = now
         except Exception as ex:
-            print(f"⚠️  Like/dislike prediction error: {ex}")
+            print(f"⚠️  NeuroSense prediction error: {ex}")
+            import traceback; traceback.print_exc()
         finally:
-            ld_is_processing = False
+            ns_is_processing = False
 
     threading.Thread(target=_predict, daemon=True).start()
 
 
 @socketio.on('reset_buffer')
 def handle_reset_buffer():
-    """Reset the EEG and PPG buffers."""
-    global eeg_buffer, ppg_buffer, ld_buffer
+    """Reset the EEG, PPG and NeuroSense buffers."""
+    global eeg_buffer, ppg_buffer, ns_buffer
     eeg_buffer = []
     ppg_buffer = []
-    ld_buffer  = []
+    ns_buffer  = []
     if args.model == 'rule':
         predictor.reset()
+    if ns_predictor:
+        ns_predictor.reset()
     print('Buffer reset')
     emit('status', {'message': 'Buffer reset'})
 
@@ -437,8 +443,8 @@ def health_check():
         'status':            'ok',
         'model':             MODEL_TYPE,
         'predictor_loaded':  predictor is not None,
-        'ld_predictor':      ld_predictor is not None,
-        'ld_user_profile':   bool(ld_predictor and ld_predictor.has_user_profile()),
+        'ns_predictor':      ns_predictor is not None,
+        'has_baseline':      os.path.exists(BASELINE_PKL),
         'eeg_buffer_size':   len(eeg_buffer),
         'ppg_buffer_size':   len(ppg_buffer),
         'buffer_needed':     BUFFER_SIZE,
@@ -447,48 +453,40 @@ def health_check():
 
 @app.route('/user/exists', methods=['GET'])
 def user_exists():
-    """Check whether a user calibration profile (user.pkl) exists."""
-    exists = os.path.exists(USER_PKL)
+    """Check whether a baseline profile exists (used by setup flow)."""
+    exists = os.path.exists(BASELINE_PKL)
     return jsonify({'exists': exists})
 
 
 @app.route('/user/delete', methods=['DELETE'])
 def user_delete():
-    """Delete the current user profile so the calibration flow re-runs."""
-    if ld_predictor:
-        ld_predictor.delete_user_profile()
-    elif os.path.exists(USER_PKL):
-        os.remove(USER_PKL)
+    """Delete the baseline profile so the calibration flow re-runs."""
+    if os.path.exists(BASELINE_PKL):
+        os.remove(BASELINE_PKL)
     return jsonify({'deleted': True})
 
 
 @app.route('/calibration/build', methods=['POST'])
 def calibration_build():
     """
-    Receive baseline + calibration EEG data from the frontend setup flow,
-    then build and persist the user profile.
+    Receive baseline EEG data from the frontend setup flow and persist it
+    for the rule-based emotion predictor.
 
     Expected JSON body:
     {
-        "baseline_samples":     [ [{tp9,af7,af8,tp10}, ...], ... ],  // list of windows
-        "calibration_samples":  [ [{tp9,af7,af8,tp10}, ...], ... ],  // list of windows
-        "labels":               [0, 1, 0, ...]                       // per calibration window
+        "baseline_samples": [ [{tp9,af7,af8,tp10}, ...], ... ]  // list of windows
     }
     Each window is a flat list of dicts with keys tp9/af7/af8/tp10.
     Window size must be 1024 samples (4 s @ 256 Hz).
     """
-    if ld_predictor is None:
-        return jsonify({'error': 'LikeDislike predictor failed to initialise — check server logs'}), 503
-
     try:
         body = request.get_json(force=True)
         if not body:
             return jsonify({'error': 'Empty request body'}), 400
 
         def _to_array(window_list):
-            """Convert a list of dicts to (4, N) np.ndarray.  None / NaN / Inf → 0.0"""
+            """Convert a list of sample dicts to (4, N) np.ndarray. None/NaN/Inf → 0.0"""
             def _f(v):
-                """Coerce a single sample value to a clean float."""
                 if v is None:
                     return 0.0
                 try:
@@ -503,43 +501,18 @@ def calibration_build():
                 [_f(s.get('tp10')) for s in window_list],
             ], dtype=np.float32)
 
-        baseline_windows    = [_to_array(w) for w in body['baseline_samples']]
-        calibration_windows = [_to_array(w) for w in body['calibration_samples']]
-        labels              = [int(l) for l in body['labels']]
-        clip_boundaries     = [int(x) for x in body['clip_boundaries']] if 'clip_boundaries' in body else None
+        baseline_windows = [_to_array(w) for w in body.get('baseline_samples', [])]
 
-        if len(calibration_windows) != len(labels):
-            return jsonify({'error': 'calibration_samples and labels length mismatch'}), 400
-        if len(calibration_windows) == 0:
-            return jsonify({'error': 'No calibration windows provided'}), 400
+        if len(baseline_windows) == 0:
+            return jsonify({'error': 'No baseline windows provided'}), 400
 
-        # NOTE: removed hard rejection when all labels are the same class.
-        # Isotonic recalibration needs both classes, but baseline + Z-score
-        # personalisation still saves and still substantially helps prediction.
-        if len(set(labels)) < 2:
-            print(f"⚠️  All labels are the same class ({set(labels)}). "
-                  f"Isotonic recalibration will be skipped, but baseline + Z-score will still save.")
+        print(f"🧠 Processing baseline: {len(baseline_windows)} windows")
 
-        print(f"🧠 Building user profile: "
-              f"{len(baseline_windows)} baseline windows, "
-              f"{len(calibration_windows)} cal windows, "
-              f"labels={labels}")
-
-        user_data = ld_predictor.build_user_profile(
-            baseline_windows, calibration_windows, labels,
-            clip_boundaries=clip_boundaries,
-        )
-        print(f"✓ User profile built and saved. "
-              f"has_iso={user_data['has_iso']}, "
-              f"n_cal={user_data['n_cal_windows']}, "
-              f"label_counts={user_data.get('label_counts')}")
-        
-        # If using rule-based emotion predictor, personalise it with baseline data
+        # Personalise rule-based emotion predictor with baseline data
         global predictor, baseline_channels_global
         if isinstance(predictor, RuleBasedEmotionPredictor) and len(baseline_windows) > 0:
             try:
-                # Concatenate all baseline windows and extract channel structure
-                # Each baseline_window is (4, 1024), so concatenate along axis 1
+                # Concatenate all baseline windows: each is (4, 1024) → (4, N)
                 baseline_eeg_concat = np.concatenate(baseline_windows, axis=1)
                 baseline_channels = {
                     'tp9':  baseline_eeg_concat[0],
@@ -548,25 +521,147 @@ def calibration_build():
                     'tp10': baseline_eeg_concat[3],
                 }
                 baseline_channels_global = baseline_channels
-                
-                # Reinitialize emotion predictor with baseline
                 predictor = RuleBasedEmotionPredictor(baseline_channels=baseline_channels)
-                print(f"[OK] Rule-based emotion predictor personalised with {len(baseline_windows)} baseline windows")
+                print(f"[OK] Rule-based emotion predictor personalised with "
+                      f"{len(baseline_windows)} baseline windows")
             except Exception as e:
                 print(f"⚠️  Failed to personalise emotion predictor with baseline: {e}")
-                # Fall back to generic thresholds (predictor already initialized)
-        
+
+        # Persist baseline so the emotion predictor is personalised on server restart
+        try:
+            with open(BASELINE_PKL, "wb") as fh:
+                pickle.dump({
+                    "baseline_for_emotion": np.concatenate(baseline_windows, axis=1),
+                    "n_baseline_windows":   len(baseline_windows),
+                }, fh)
+            print(f"[OK] Baseline saved to {BASELINE_PKL}")
+        except Exception as e:
+            print(f"⚠️  Could not save baseline.pkl: {e}")
+
         return jsonify({
-            'success':          True,
-            'n_cal_windows':    user_data['n_cal_windows'],
-            'has_iso':          user_data['has_iso'],
-            'has_user_profile': True,
+            'success':            True,
+            'n_baseline_windows': len(baseline_windows),
         })
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+@app.route('/song_switch', methods=['POST'])
+def song_switch_report():
+    """
+    Receive per-song-switch metrics from the frontend player and print a
+    formatted summary to the terminal.
+    """
+    try:
+        d = request.get_json(force=True) or {}
+
+        song_num     = d.get('song_number', '?')
+        mode         = d.get('mode', 'focus')
+        dom_emotion  = str(d.get('dominant_emotion', 'unknown')).upper()
+        breakdown    = d.get('emotion_breakdown', {})
+        total        = d.get('emotion_total', 0)
+        prev_e       = d.get('prev_energy')
+        new_e        = d.get('new_energy')
+        reason       = d.get('energy_change_reason', 'drift toward baseline')
+        val_label    = d.get('valence_label', 'N/A')
+        val_score    = d.get('valence_score')
+        val_windows  = d.get('valence_windows', 0)
+        block_scores = d.get('block_scores', [])
+        block_size   = d.get('block_size', 5)
+        block_done   = d.get('block_complete', False)
+        block_avg    = d.get('block_avg_score')
+        genre_rot    = d.get('genre_rotated', False)
+        prev_genre   = d.get('prev_genre', '?')
+        cur_genre    = d.get('current_genre', '?')
+
+        def energy_label(e):
+            if e is None:
+                return '—'
+            if e >= 0.66:
+                return 'upbeat energetic fast'
+            if e >= 0.51:
+                return 'moderate steady focused'
+            if e >= 0.31:
+                return 'calm relaxing slow'
+            return 'ambient meditative very slow'
+
+        def energy_arrow(p, n):
+            if p is None or n is None:
+                return ''
+            diff = n - p
+            if diff > 0.005:
+                return f'↑ +{diff:.3f}'
+            if diff < -0.005:
+                return f'↓ {diff:.3f}'
+            return f'→ {diff:+.3f}'
+
+        sep = '=' * 62
+
+        lines = [
+            '',
+            sep,
+            f'🎵  SONG SWITCH  (song #{song_num} complete | mode: {mode})',
+            '-' * 62,
+        ]
+
+        # Emotion breakdown
+        if total > 0 and breakdown:
+            lines.append('Emotion during track:')
+            for emotion, count in sorted(breakdown.items(), key=lambda x: -x[1]):
+                pct  = count / total * 100
+                bar  = '█' * max(1, int(pct / 5))
+                flag = '  ◀ dominant' if emotion.lower() == dom_emotion.lower() else ''
+                lines.append(f'   {emotion:<12} {bar:<20} {pct:5.1f}%{flag}')
+        else:
+            lines.append(f'Emotion during track:  {dom_emotion}  (no breakdown available)')
+
+        # Energy
+        lines.append('')
+        lines.append('Adaptive Energy:')
+        if prev_e is not None and new_e is not None:
+            arrow = energy_arrow(prev_e, new_e)
+            lines.append(f'   {prev_e:.3f}  →  {new_e:.3f}  ({arrow})  [{reason}]')
+        lines.append(f'   Target for next song: {new_e:.3f}  →  "{energy_label(new_e)}"')
+
+        # NeuroSense valence
+        lines.append('')
+        val_icon = '🟢' if val_label == 'POSITIVE' else ('🔴' if val_label == 'NEGATIVE' else '⚪')
+        score_str = f'  smoothed={val_score:.3f}' if val_score is not None else ''
+        lines.append(f'NeuroSense Valence:  {val_icon} {val_label}{score_str}  (n={val_windows} windows)')
+
+        # Genre block
+        lines.append('')
+        scored   = len(block_scores)
+        scores_s = '  '.join(
+            ('✅' if s == 0.0 else '❌') for s in block_scores
+        ) if block_scores else '—'
+
+        if block_done:
+            avg_pct = (block_avg or 0) * 100
+            lines.append(f'Genre block:  {scored}/{block_size} songs scored  |  avg dislike {avg_pct:.0f}%')
+            lines.append(f'   Scores:  {scores_s}')
+            if genre_rot:
+                lines.append(f'   ⚠  GENRE ROTATION:  "{prev_genre}"  →  "{cur_genre}"')
+            else:
+                lines.append(f'   ✓  Keeping genre:  "{cur_genre}"  (positive affect)')
+        else:
+            lines.append(f'Genre block:  {scored}/{block_size} songs scored so far  (no rotation yet)')
+            lines.append(f'   Scores:  {scores_s}')
+            lines.append(f'   Current genre:  "{cur_genre}"')
+
+        lines.append(sep)
+        lines.append('')
+
+        print('\n'.join(lines))
+        return jsonify({'ok': True})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     print("\n" + "="*60)
@@ -575,6 +670,7 @@ if __name__ == '__main__':
     print(f"Model: {MODEL_TYPE}")
     print(f"Server starting on http://localhost:5000")
     print(f"Buffer size: {BUFFER_SIZE} samples ({BUFFER_SIZE/SAMPLE_RATE:.1f}s of EEG)")
+    print(f"NeuroSense: {'loaded' if ns_predictor else 'UNAVAILABLE'}")
     if MODEL_TYPE == 'RULE':
         print("PPG: accepted via 'ppg_sample' events (Muse 2, ~64 Hz)")
         print("Emotions: focus | stress | relaxed | tired")

@@ -113,8 +113,8 @@ function SongCard({ song, rank, mode }: { song: SongRecord; rank: number; mode: 
         <p className="mt-1 text-xs text-gray-500">
           Dominant emotion: <span className="capitalize text-gray-300">{song.dominantEmotion}</span>
           {song.likeDislikeLabel && (
-            <span className={`ml-2 ${song.likeDislikeLabel === 'like' ? 'text-emerald-400' : 'text-red-400'}`}>
-              {song.likeDislikeLabel === 'like' ? '👍 liked' : '👎 disliked'}
+            <span className={`ml-2 ${song.likeDislikeLabel === 'POSITIVE' ? 'text-emerald-400' : 'text-red-400'}`}>
+              {song.likeDislikeLabel === 'POSITIVE' ? '😊 positive' : '😔 negative'}
             </span>
           )}
         </p>

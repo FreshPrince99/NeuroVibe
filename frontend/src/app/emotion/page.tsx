@@ -35,7 +35,7 @@ export default function EmotionPage() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [eegDataBuffer, setEegDataBuffer] = useState<EEGData[]>([]);
   const [ppgDataBuffer, setPpgDataBuffer] = useState<number[]>([]);  // for local PPG waveform
-  const [likeDislikeData, setLikeDislikeData] = useState<{ label: string; probability: number; confidence: number } | null>(null);
+  const [valenceData, setValenceData] = useState<{ valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number } | null>(null);
   const [ppgAvailable, setPpgAvailable] = useState<boolean | null>(null);
   const [sessionMode, setSessionMode] = useState<string>('focus');
   const ppgAvailableRef = useRef<boolean | null>(null);
@@ -89,9 +89,9 @@ export default function EmotionPage() {
       reconnectionAttempts: 5
     });
 
-    // Listen for like/dislike predictions
-    socketRef.current.on('likedislike_prediction', (data: { label: string; probability: number; confidence: number }) => {
-      setLikeDislikeData(data);
+    // Listen for NeuroSense valence predictions
+    socketRef.current.on('valence_prediction', (data: { valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number }) => {
+      setValenceData(data);
     });
 
     // Listen for emotion predictions
@@ -468,18 +468,18 @@ export default function EmotionPage() {
 
   return (
     <div className="relative">
-      {likeDislikeData && (
+      {valenceData && valenceData.valence !== "UNCERTAIN" && (
         <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl border backdrop-blur-md text-sm font-light shadow-xl"
           style={{
-            background: likeDislikeData.label === 'like' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
-            borderColor: likeDislikeData.label === 'like' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)',
-            color: likeDislikeData.label === 'like' ? '#86efac' : '#fca5a5',
+            background:   valenceData.valence === 'POSITIVE' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+            borderColor:  valenceData.valence === 'POSITIVE' ? 'rgba(34,197,94,0.4)'  : 'rgba(239,68,68,0.4)',
+            color:        valenceData.valence === 'POSITIVE' ? '#86efac'               : '#fca5a5',
           }}
         >
-          <span className="text-lg">{likeDislikeData.label === 'like' ? '👍' : '👎'}</span>
+          <span className="text-lg">{valenceData.valence === 'POSITIVE' ? '😊' : '😔'}</span>
           <div>
-            <p className="font-medium capitalize">{likeDislikeData.label}ing this</p>
-            <p className="text-xs opacity-70">{Math.round(likeDislikeData.confidence * 100)}% confident</p>
+            <p className="font-medium">{valenceData.valence === 'POSITIVE' ? 'Positive response' : 'Negative response'}</p>
+            <p className="text-xs opacity-70">score {valenceData.smoothed_score.toFixed(2)} · {valenceData.n_windows} windows</p>
           </div>
         </div>
       )}
@@ -517,7 +517,7 @@ export default function EmotionPage() {
           onBackToHome={handleBackToHome}
           onStopSession={handleStopSession}
           playerRef={playerRef}
-          likeDislike={likeDislikeData}
+          valence={valenceData}
         />
       )}
     </div>

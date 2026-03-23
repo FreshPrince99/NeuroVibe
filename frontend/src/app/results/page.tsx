@@ -34,9 +34,10 @@ function productivityLabel(score: number): { label: string; colour: string } {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function SignalGraph({ data, peakMetric }: {
+function SignalGraph({ data, peakMetric, breaks }: {
   data: Array<{ t: number; focus: number; calm: number; control: number }>;
   peakMetric: 'focus' | 'calm';
+  breaks?: Array<{ startMs: number; endMs: number }>;
 }) {
   if (data.length < 2) {
     return (
@@ -98,6 +99,28 @@ function SignalGraph({ data, peakMetric }: {
           strokeWidth="0.8"
           rx="2"
         />
+        {/* Break markers */}
+        {(breaks ?? []).map((br, i) => {
+          const startSec = br.startMs / 1000;
+          const endSec = (br.endMs > 0 ? br.endMs : br.startMs + 300_000) / 1000; // default 5 min if not ended
+          const bx1 = x(Math.min(startSec, maxT));
+          const bx2 = x(Math.min(endSec, maxT));
+          const midX = (bx1 + bx2) / 2;
+          return (
+            <g key={i}>
+              <rect
+                x={bx1} y={pad.top}
+                width={Math.max(bx2 - bx1, 2)}
+                height={gH}
+                fill="rgba(139,92,246,0.15)"
+                stroke="rgba(139,92,246,0.35)"
+                strokeWidth="0.8"
+                rx="2"
+              />
+              <text x={midX} y={pad.top - 3} fontSize="8" fill="#a78bfa" textAnchor="middle">Break</text>
+            </g>
+          );
+        })}
         {/* Grid lines */}
         {yTicks.map(v => (
           <g key={v}>
@@ -287,10 +310,13 @@ function CognitiveAnalysis({ session }: { session: SessionData }) {
   const avgPpg     = avg(stats.map(s => s.ppg));
 
   const activityNames: Record<string, string> = {
-    'neural-ball': 'Neural Expansion Ball',
+    'neural-ball': 'Sharpen Focus',
+    'ocean-waves': 'Unwind & Relax',
+    'balance-bar': 'Find Balance',
+    'pulse-pilot': 'Reset & Breathe',
+    // legacy
     'neuro-drive': 'Neuro Drive',
     'signal-shield': 'Signal Shield',
-    'pulse-pilot': 'Pulse Pilot',
   };
 
   const activityName = activityNames[session.activityId ?? ''] ?? 'Cognitive Activity';
@@ -448,7 +474,7 @@ export default function ResultsPage() {
               {isMusic ? 'Derived from rule-based EEG scores' : 'Raw EEG band power'}
             </p>
           </div>
-          <SignalGraph data={session.eegSnapshots} peakMetric={session.mode === 'relaxation' ? 'calm' : 'focus'} />
+          <SignalGraph data={session.eegSnapshots} peakMetric={session.mode === 'relaxation' ? 'calm' : 'focus'} breaks={session.breaks ?? []} />
         </div>
 
         {/* ── Mode-specific content ─────────────────────────────────── */}

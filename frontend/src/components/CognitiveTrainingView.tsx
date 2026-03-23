@@ -17,8 +17,51 @@ interface VADData {
   dominance: number;
 }
 
-type ActivityId = 'neural-ball' | 'neuro-drive' | 'signal-shield' | 'pulse-pilot';
+type GoalId = 'focus' | 'relax' | 'balance' | 'reset';
+type ActivityId = 'neural-ball' | 'ocean-waves' | 'balance-bar' | 'pulse-pilot';
 type Phase = 'select' | 'running' | 'results';
+
+const GOAL_TO_ACTIVITY: Record<GoalId, ActivityId> = {
+  focus: 'neural-ball',
+  relax: 'ocean-waves',
+  balance: 'balance-bar',
+  reset: 'pulse-pilot',
+};
+
+const GOALS: Array<{ id: GoalId; title: string; subtitle: string; description: string; icon: string; color: string }> = [
+  {
+    id: 'focus',
+    title: 'Sharpen Focus',
+    subtitle: 'Grow your focus sphere',
+    description: 'Train sustained attention. Watch the neural sphere expand as your frontal brain engagement increases.',
+    icon: '🎯',
+    color: 'cyan',
+  },
+  {
+    id: 'relax',
+    title: 'Unwind & Relax',
+    subtitle: 'Still the ocean waves',
+    description: 'Calm your mind and watch the waves settle into a peaceful sea as your brain enters a relaxed state.',
+    icon: '🌊',
+    color: 'blue',
+  },
+  {
+    id: 'balance',
+    title: 'Find Balance',
+    subtitle: 'Center your mind',
+    description: 'Balance your left and right brain activity. Keep the needle centered to achieve mental equilibrium.',
+    icon: '⚖️',
+    color: 'violet',
+  },
+  {
+    id: 'reset',
+    title: 'Reset & Breathe',
+    subtitle: 'Steady your heart rhythm',
+    description: 'Follow the breathing guide to slow your heart rate and build calm through paced breathing.',
+    icon: '🫁',
+    color: 'rose',
+  },
+];
 
 interface CognitiveTrainingViewProps {
   eegData: EEGData[];
@@ -33,34 +76,9 @@ interface CognitiveTrainingViewProps {
   onStopSession?: () => void;
   onPauseToggle: () => void;
   isPaused: boolean;
+  isBreakMode?: boolean;
+  onReturnToSession?: () => void;
 }
-
-const ACTIVITIES: Array<{ id: ActivityId; title: string; description: string; channels: string }> = [
-  {
-    id: 'neural-ball',
-    title: 'Neural Expansion Ball',
-    description: 'Grow the sphere by raising BOTH focus AND calm at the same time. If either drops the sphere shrinks — sustain a relaxed-alert state to keep it growing.',
-    channels: 'AF7 • AF8 • TP9 • TP10',
-  },
-  {
-    id: 'neuro-drive',
-    title: 'Neuro Drive',
-    description: 'Race a car using your brain. High focus keeps the car straight and accelerating. Losing focus causes unstable swerving. Complete the track as quickly as possible.',
-    channels: 'AF7 • AF8 • TP9 • TP10',
-  },
-  {
-    id: 'signal-shield',
-    title: 'Signal Shield',
-    description: 'Strengthen a shield by balancing your left and right frontal EEG activity. Hemispheric balance reflects emotional equilibrium — keep both sides equal to stay strong.',
-    channels: 'AF7 • AF8',
-  },
-  {
-    id: 'pulse-pilot',
-    title: 'Pulse Pilot',
-    description: 'Smooth your heart rhythm using paced breathing. Follow the breathing circle — inhale 4s, hold 1s, exhale 6s. A more regular PPG waveform means better vagal tone.',
-    channels: 'PPG • AF7 • AF8',
-  },
-];
 
 const toFinite = (value: number | null | undefined, fallback = 0) => (
   Number.isFinite(value) ? Number(value) : fallback
@@ -82,31 +100,29 @@ function getActivityInsights(
   lapTimeSeconds?: number | null,
 ): { title: string; insight: string; quality: 'excellent' | 'good' | 'fair' | 'needs-work'; score: number } {
   if (activity === 'neural-ball') {
-    const balanceScore = Math.abs(avgFocus - avgCalm);
-    const quality = balanceScore < 0.15 ? 'excellent' : balanceScore < 0.25 ? 'good' : balanceScore < 0.35 ? 'fair' : 'needs-work';
+    const q = avgFocus > 0.7 ? 'excellent' : avgFocus > 0.55 ? 'good' : avgFocus > 0.4 ? 'fair' : 'needs-work';
     return {
-      title: 'Expansion Balance',
-      insight: `Focus and calm were ${balanceScore < 0.15 ? 'well-balanced' : balanceScore < 0.25 ? 'reasonably balanced' : 'imbalanced'}. ${avgFocus > avgCalm ? 'You were more focused than relaxed.' : 'You were more relaxed than focused.'} The sphere reached ${Math.round(peakValue * 100)}% at peak.`,
-      quality,
-      score: (avgFocus * 0.55 + avgCalm * 0.45),
+      title: 'Focus Training',
+      insight: `Average focus: ${Math.round(avgFocus * 100)}%. The sphere reached ${Math.round(peakValue * 100)}% at peak. ${avgFocus > 0.7 ? 'Excellent sustained attention!' : avgFocus > 0.55 ? 'Good focus — keep training.' : 'Try to minimize distractions and breathe steadily.'}`,
+      quality: q,
+      score: avgFocus,
     };
   }
-  if (activity === 'neuro-drive') {
-    const speed = Math.round(avgControl * 180);
-    const quality = lapTimeSeconds && lapTimeSeconds < 120 ? 'excellent' : lapTimeSeconds && lapTimeSeconds < 180 ? 'good' : lapTimeSeconds && lapTimeSeconds < 240 ? 'fair' : 'needs-work';
+  if (activity === 'ocean-waves') {
+    const q = avgCalm > 0.7 ? 'excellent' : avgCalm > 0.55 ? 'good' : avgCalm > 0.4 ? 'fair' : 'needs-work';
     return {
-      title: 'Racing Performance',
-      insight: `You completed the race in ${lapTimeSeconds?.toFixed(2)}s at average speed ${speed} km/h. ${lapTimeSeconds && lapTimeSeconds < 120 ? 'Excellent control and focus!' : lapTimeSeconds && lapTimeSeconds < 180 ? 'Good steady performance.' : 'Try maintaining focus for better lap times.'}`,
-      quality,
-      score: lapTimeSeconds ? clamp(1 - lapTimeSeconds / 300) : 0,
+      title: 'Relaxation Depth',
+      insight: `Average calm: ${Math.round(avgCalm * 100)}%. ${avgCalm > 0.7 ? 'Deep relaxation achieved — excellent parasympathetic tone.' : avgCalm > 0.55 ? 'Good relaxation. Keep practicing slow breathing.' : 'Waves were still active. Try progressive muscle relaxation before the next session.'}`,
+      quality: q,
+      score: avgCalm,
     };
   }
-  if (activity === 'signal-shield') {
-    const symmetryQuality = symmetry > 0.7 ? 'excellent' : symmetry > 0.55 ? 'good' : symmetry > 0.4 ? 'fair' : 'needs-work';
+  if (activity === 'balance-bar') {
+    const q = symmetry > 0.7 ? 'excellent' : symmetry > 0.55 ? 'good' : symmetry > 0.4 ? 'fair' : 'needs-work';
     return {
-      title: 'Frontal Balance Mastery',
-      insight: `Frontal symmetry: ${Math.round(symmetry * 100)}% (${['excellent', 'good', 'fair', 'needs-work'][['excellent', 'good', 'fair', 'needs-work'].indexOf(symmetryQuality)]}). Your hemispheres were ${symmetry > 0.7 ? 'well-synchronized' : symmetry > 0.55 ? 'reasonably balanced' : 'asymmetric'}. Peak strength: ${Math.round(peakValue * 100)}%.`,
-      quality: symmetryQuality as 'excellent' | 'good' | 'fair' | 'needs-work',
+      title: 'Hemispheric Balance',
+      insight: `Frontal symmetry: ${Math.round(symmetry * 100)}% (${q}). Your hemispheres were ${symmetry > 0.7 ? 'well-synchronized' : symmetry > 0.55 ? 'reasonably balanced' : 'asymmetric'}. Peak balance score: ${Math.round(peakValue * 100)}%.`,
+      quality: q,
       score: symmetry,
     };
   }
@@ -149,21 +165,11 @@ function SessionGraph({ data }: { data: Array<{ focus: number; calm: number; con
             <stop offset="100%" stopColor="rgba(100,100,150,0.05)" />
           </linearGradient>
         </defs>
-        
-        {/* Grid background */}
         <rect x={padding} y={padding} width={graphW} height={graphH} fill="url(#gridGrad)" />
-        
-        {/* Axis labels */}
         <text x={padding - 30} y={padding + graphH + 5} fontSize="11" fill="#888">0%</text>
         <text x={padding - 30} y={padding + 10} fontSize="11" fill="#888">100%</text>
-        
-        {/* Control line */}
         <path d={controlPath} stroke="#a855f7" strokeWidth="2" fill="none" />
-        
-        {/* Focus line */}
         <path d={focusPath} stroke="#06b6d4" strokeWidth="2" fill="none" />
-        
-        {/* Calm line */}
         <path d={calmPath} stroke="#ec4899" strokeWidth="2" fill="none" />
       </svg>
       <div className="mt-3 flex gap-4 text-xs">
@@ -215,8 +221,6 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
   const overallStd = stdDev(window.flatMap((sample) => [sample.tp9, sample.af7, sample.af8, sample.tp10]).map((value) => Math.abs(value)));
   const stability = clamp(1 - overallStd / 250);
 
-  // Frontal engagement: ratio of frontal to total power, stretched from [0.3,1] → [0,1].
-  // The old formula added constants (+1/+2) that swamped small EEG amplitudes — fixed here.
   const frontalRatio = frontalEnergy / Math.max(frontalEnergy + temporalEnergy, 1e-6);
   const engagement = clamp((frontalRatio - 0.3) / 0.7);
 
@@ -229,8 +233,6 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
 
   const ppgWindow = ppgData.slice(-160).map((value) => toFinite(value));
   const ppgDiff = ppgWindow.slice(1).map((value, index) => Math.abs(value - ppgWindow[index]));
-  // Coefficient of variation: lower CV = smoother pulse = better regulation.
-  // Old formula added +8 to denominator which capped the score unreliably.
   const ppgMean = average(ppgDiff);
   const ppgCV = ppgMean > 1e-6 ? stdDev(ppgDiff) / ppgMean : 1;
   const ppgRegulation = ppgWindow.length > 20 ? clamp(1 - Math.min(ppgCV, 1)) : 0;
@@ -242,36 +244,305 @@ function calculateBrainMetrics(eegData: EEGData[], ppgData: number[], predictedV
     symmetry,
     stability,
     ppgRegulation,
+    af7Energy,
+    af8Energy,
   };
 }
 
-function RunningVisualization({ selectedActivity, progressValue, metrics, ppgData, lapTimeSeconds }: {
+// ── Wave animation helper ──────────────────────────────────────────────────
+function generateWavePath(width: number, height: number, amplitude: number, phase: number, wavelength: number): string {
+  const points: string[] = [];
+  for (let x = 0; x <= width; x += 4) {
+    const y = height / 2 + Math.sin((x / wavelength) * 2 * Math.PI + phase) * amplitude;
+    points.push(`${x === 0 ? 'M' : 'L'} ${x} ${y}`);
+  }
+  return points.join(' ');
+}
+
+// ── PPG BPM estimation ─────────────────────────────────────────────────────
+const PPG_FS = 64;
+
+function estimateBpm(data: number[]): number | null {
+  if (data.length < PPG_FS * 3) return null;
+  const mean = data.reduce((a, b) => a + b, 0) / data.length;
+  const std = Math.sqrt(data.map(v => (v - mean) ** 2).reduce((a, b) => a + b, 0) / data.length);
+  if (std < 1e-6) return null;
+  const norm = data.map(v => (v - mean) / std);
+  const minDist = Math.round(PPG_FS * 0.35);
+  const peaks: number[] = [];
+  for (let i = minDist; i < norm.length - minDist; i++) {
+    if (norm[i] > 0.3) {
+      let isPeak = true;
+      for (let j = i - minDist; j <= i + minDist; j++) {
+        if (j !== i && norm[j] >= norm[i]) { isPeak = false; break; }
+      }
+      if (isPeak) peaks.push(i);
+    }
+  }
+  if (peaks.length < 2) return null;
+  const intervals = [];
+  for (let i = 1; i < peaks.length; i++) {
+    intervals.push((peaks[i] - peaks[i - 1]) / PPG_FS);
+  }
+  const valid = intervals.filter(v => v > 0.3 && v < 2.0).sort((a, b) => a - b);
+  if (valid.length < 1) return null;
+  const medianRR = valid[Math.floor(valid.length / 2)];
+  const bpm = Math.round(60 / medianRR);
+  return bpm > 30 && bpm < 200 ? bpm : null;
+}
+
+// ── Running visualizations ─────────────────────────────────────────────────
+function OceanWavesVisualization({ metrics }: { metrics: ReturnType<typeof calculateBrainMetrics> }) {
+  const calmLevel = clamp(metrics.calm);
+  const phaseRef = useRef([0, 0, 0]);
+  const animFrameRef = useRef<number | null>(null);
+  const [wavePaths, setWavePaths] = useState<string[]>(['', '', '']);
+
+  const calmLabel =
+    calmLevel >= 0.85 ? 'Deep Calm' :
+    calmLevel >= 0.70 ? 'Calm' :
+    calmLevel >= 0.50 ? 'Settling' :
+    calmLevel >= 0.30 ? 'Unsettled' : 'Agitated';
+
+  const calmLabelColor =
+    calmLevel >= 0.70 ? '#34d399' :
+    calmLevel >= 0.50 ? '#60a5fa' :
+    calmLevel >= 0.30 ? '#f59e0b' : '#f87171';
+
+  useEffect(() => {
+    const maxAmps = [60, 50, 40];
+    const wavelengths = [180, 220, 150];
+    const speeds = [0.018, 0.012, 0.022];
+    const svgW = 520;
+    const svgH = 160;
+
+    const animate = () => {
+      const calm = clamp(metrics.calm);
+      phaseRef.current = phaseRef.current.map((p, i) => p + speeds[i] * (1 + (1 - calm) * 1.5));
+      const paths = maxAmps.map((maxAmp, i) => {
+        const amplitude = (1 - calm) * maxAmp + 4;
+        return generateWavePath(svgW, svgH, amplitude, phaseRef.current[i], wavelengths[i]);
+      });
+      setWavePaths(paths);
+      animFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animFrameRef.current = requestAnimationFrame(animate);
+    return () => {
+      if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [metrics.calm]);
+
+  const waveColors = ['#0ea5e9', '#38bdf8', '#7dd3fc'];
+  const waveOpacities = [0.8, 0.6, 0.4];
+
+  return (
+    <div className="mx-auto w-full max-w-4xl space-y-4">
+      {/* Ocean scene */}
+      <div className="relative overflow-hidden rounded-2xl border border-blue-500/30 bg-gradient-to-b from-slate-950 via-blue-950/40 to-slate-950" style={{ minHeight: 340 }}>
+        {/* Stars */}
+        <div className="pointer-events-none absolute inset-0">
+          {[...Array(20)].map((_, i) => (
+            <div key={i} className="absolute rounded-full bg-white"
+              style={{
+                width: Math.random() * 2 + 1,
+                height: Math.random() * 2 + 1,
+                top: `${Math.random() * 40}%`,
+                left: `${Math.random() * 100}%`,
+                opacity: 0.3 + Math.random() * 0.5,
+              }}
+            />
+          ))}
+        </div>
+        {/* Moon */}
+        <div className="absolute top-6 right-10 h-10 w-10 rounded-full bg-yellow-100/80 shadow-[0_0_20px_rgba(253,224,71,0.4)]" />
+
+        {/* Calm score overlay */}
+        <div className="absolute top-5 left-6 space-y-1">
+          <p className="text-xs uppercase tracking-widest text-blue-300">Calm Level</p>
+          <p className="text-4xl font-bold" style={{ color: calmLabelColor }}>{Math.round(calmLevel * 100)}%</p>
+          <p className="text-sm font-medium" style={{ color: calmLabelColor }}>{calmLabel}</p>
+        </div>
+
+        {/* SVG waves */}
+        <div className="absolute bottom-0 left-0 right-0" style={{ height: 200 }}>
+          <svg viewBox="0 0 520 160" className="w-full h-full" preserveAspectRatio="none">
+            {waveColors.map((color, i) => (
+              <path
+                key={i}
+                d={wavePaths[i]}
+                fill="none"
+                stroke={color}
+                strokeWidth={2.5 - i * 0.4}
+                strokeOpacity={waveOpacities[i]}
+                strokeLinecap="round"
+                style={{ transition: 'stroke-opacity 1.5s ease' }}
+              />
+            ))}
+            {/* Water fill under first wave */}
+            {wavePaths[0] && (
+              <path
+                d={`${wavePaths[0]} L 520 160 L 0 160 Z`}
+                fill={`rgba(14,165,233,${0.06 + calmLevel * 0.08})`}
+                style={{ transition: 'fill 1.5s ease' }}
+              />
+            )}
+          </svg>
+        </div>
+
+        {/* Calm bar */}
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-64">
+          <div className="flex justify-between text-xs text-blue-300 mb-1">
+            <span>Agitated</span><span>Deep Calm</span>
+          </div>
+          <div className="h-2 rounded-full bg-blue-950/60 border border-blue-500/30">
+            <div
+              className="h-full rounded-full transition-all duration-[1500ms] ease"
+              style={{ width: `${Math.round(calmLevel * 100)}%`, background: 'linear-gradient(to right, #38bdf8, #34d399)' }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 p-4">
+          <p className="text-xs text-blue-300 uppercase tracking-widest">Calm Score</p>
+          <p className="mt-2 text-2xl font-bold text-blue-200">{Math.round(calmLevel * 100)}%</p>
+          <p className="mt-1 text-xs text-gray-500">Neural relaxation index</p>
+        </div>
+        <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 p-4">
+          <p className="text-xs text-sky-300 uppercase tracking-widest">State</p>
+          <p className="mt-2 text-2xl font-bold" style={{ color: calmLabelColor }}>{calmLabel}</p>
+          <p className="mt-1 text-xs text-gray-500">Current mental state</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BalanceBarVisualization({ metrics, eegData }: {
+  metrics: ReturnType<typeof calculateBrainMetrics>;
+  eegData: EEGData[];
+}) {
+  const inGreenZoneCountRef = useRef(0);
+  const totalSamplesRef = useRef(0);
+  const [balanceScore, setBalanceScore] = useState(0);
+
+  const window96 = eegData.slice(-96);
+  const af7Energy = average(window96.map(s => Math.abs(toFinite(s.af7))));
+  const af8Energy = average(window96.map(s => Math.abs(toFinite(s.af8))));
+  const total = af7Energy + af8Energy;
+  const needlePos = total > 1e-6 ? (af8Energy - af7Energy) / total : 0; // -1 (AF7 dominant) to +1 (AF8 dominant)
+  const needlePct = clamp((needlePos + 1) / 2) * 100; // 0-100%
+  const inGreenZone = Math.abs(needlePos) < 0.15;
+
+  useEffect(() => {
+    totalSamplesRef.current += 1;
+    if (inGreenZone) inGreenZoneCountRef.current += 1;
+    setBalanceScore(totalSamplesRef.current > 0 ? inGreenZoneCountRef.current / totalSamplesRef.current : 0);
+  }, [needlePos, inGreenZone]);
+
+  const needleColor = inGreenZone ? '#34d399' : Math.abs(needlePos) < 0.35 ? '#f59e0b' : '#f87171';
+
+  return (
+    <div className="mx-auto w-full max-w-4xl space-y-4">
+      <div className="rounded-2xl border border-violet-500/30 bg-violet-500/5 p-6 space-y-6">
+        {/* Labels */}
+        <div className="flex justify-between text-sm">
+          <div className="text-left">
+            <p className="font-semibold text-violet-300">Left Brain (AF7)</p>
+            <p className="text-xs text-gray-500">Logical · Analytical · Language</p>
+          </div>
+          <div className="text-right">
+            <p className="font-semibold text-violet-300">Right Brain (AF8)</p>
+            <p className="text-xs text-gray-500">Creative · Intuitive · Spatial</p>
+          </div>
+        </div>
+
+        {/* Balance track */}
+        <div className="relative">
+          <div className="h-8 rounded-full bg-gray-800 border border-gray-700 overflow-hidden relative">
+            {/* Green center zone */}
+            <div
+              className="absolute inset-y-0 bg-emerald-500/20 border-x border-emerald-500/40"
+              style={{ left: '35%', width: '30%' }}
+            />
+            {/* Amber zones */}
+            <div className="absolute inset-y-0 bg-amber-500/10 border-r border-amber-500/20" style={{ left: '15%', width: '20%' }} />
+            <div className="absolute inset-y-0 bg-amber-500/10 border-l border-amber-500/20" style={{ left: '65%', width: '20%' }} />
+            {/* Red outer zones */}
+            <div className="absolute inset-y-0 bg-red-500/10" style={{ left: 0, width: '15%' }} />
+            <div className="absolute inset-y-0 bg-red-500/10" style={{ right: 0, width: '15%' }} />
+            {/* Center marker */}
+            <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-white/20" />
+            {/* Needle */}
+            <div
+              className="absolute top-1 h-6 w-3 rounded-full transition-all duration-300"
+              style={{
+                left: `calc(${needlePct}% - 6px)`,
+                background: needleColor,
+                boxShadow: `0 0 10px ${needleColor}`,
+              }}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-gray-500 mt-1">
+            <span>Left</span>
+            <span className="text-emerald-400">Center Zone</span>
+            <span>Right</span>
+          </div>
+        </div>
+
+        {/* Goal text */}
+        <p className="text-center text-sm text-gray-400">Keep the needle centered for whole-brain thinking</p>
+
+        {/* Stats */}
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div className="rounded-xl border border-violet-600/30 bg-violet-500/10 p-3 text-center">
+            <p className="text-xs text-violet-300 uppercase tracking-widest">Left (AF7)</p>
+            <p className="mt-1 text-xl font-bold text-violet-200">{Math.round(af7Energy)}</p>
+            <p className="text-xs text-gray-500">µV</p>
+          </div>
+          <div className="rounded-xl border border-emerald-600/30 bg-emerald-500/10 p-3 text-center">
+            <p className="text-xs text-emerald-300 uppercase tracking-widest">Balance Score</p>
+            <p className="mt-1 text-xl font-bold text-emerald-200">{Math.round(balanceScore * 100)}%</p>
+            <p className="text-xs text-gray-500">time in zone</p>
+          </div>
+          <div className="rounded-xl border border-violet-600/30 bg-violet-500/10 p-3 text-center">
+            <p className="text-xs text-violet-300 uppercase tracking-widest">Right (AF8)</p>
+            <p className="mt-1 text-xl font-bold text-violet-200">{Math.round(af8Energy)}</p>
+            <p className="text-xs text-gray-500">µV</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RunningVisualization({ selectedActivity, progressValue, metrics, ppgData, eegData }: {
   selectedActivity: ActivityId;
   progressValue: number;
   metrics: ReturnType<typeof calculateBrainMetrics>;
   ppgData: number[];
-  lapTimeSeconds?: number | null;
+  eegData: EEGData[];
 }) {
   if (selectedActivity === 'neural-ball') {
-    const displayProgress = clamp(Math.sqrt(metrics.focus * metrics.calm));
-    const hue = Math.round(180 + displayProgress * 60); // cyan → teal → green
+    const displayProgress = clamp(metrics.focus);
+    const hue = Math.round(180 + displayProgress * 60);
     const glow = Math.round(displayProgress * 100);
     const rings = [1.6, 1.3, 1.0];
-    const isBalanced = Math.abs(metrics.focus - metrics.calm) < 0.18;
-    const limitingMetric = metrics.focus < metrics.calm ? 'focus' : 'calm';
+    const isGood = metrics.focus >= 0.5;
 
     return (
       <div className="flex flex-col items-center gap-5">
         {/* Guidance banner */}
         <div className="rounded-xl border border-gray-700 bg-black/40 px-5 py-3 text-center">
-          {isBalanced && displayProgress > 0.5 ? (
-            <p className="text-sm font-medium text-emerald-300">Great balance — sphere is growing</p>
+          {isGood ? (
+            <p className="text-sm font-medium text-emerald-300">Great focus — sphere is growing</p>
           ) : (
-            <p className="text-sm font-medium text-amber-300">
-              Raise your <span className="font-bold capitalize">{limitingMetric}</span> to grow the sphere
-            </p>
+            <p className="text-sm font-medium text-amber-300">Raise your <span className="font-bold">focus</span> to grow the sphere</p>
           )}
-          <p className="mt-0.5 text-xs text-gray-500">Both focus AND calm must be high simultaneously</p>
+          <p className="mt-0.5 text-xs text-gray-500">Increase frontal brain engagement to expand the sphere</p>
         </div>
 
         {/* Sphere */}
@@ -302,299 +573,38 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
           </div>
         </div>
 
-        {/* Contribution bars */}
-        <div className="grid w-full max-w-sm grid-cols-2 gap-3 text-sm">
-          {([
-            { label: 'Focus', value: metrics.focus, okColor: '#22d3ee', badColor: '#f87171', desc: 'Frontal engagement' },
-            { label: 'Calm', value: metrics.calm, okColor: '#ec4899', badColor: '#f87171', desc: 'Low arousal' },
-          ] as const).map(({ label, value, okColor, badColor, desc }) => {
-            const ok = value >= 0.45;
-            const color = ok ? okColor : badColor;
-            return (
-              <div key={label} className="rounded-lg border bg-black/40 p-3"
-                style={{ borderColor: ok ? `${okColor}40` : '#f8717130' }}>
-                <div className="flex justify-between text-gray-300">
-                  <span>{label}</span>
-                  <span style={{ color }} className="font-semibold">{Math.round(value * 100)}%</span>
-                </div>
-                <div className="mt-2 h-2 rounded-full bg-gray-800">
-                  <div className="h-full rounded-full transition-all duration-300"
-                    style={{ width: `${Math.round(value * 100)}%`, background: color }} />
-                </div>
-                <p className="mt-1 text-xs" style={{ color: `${color}90` }}>
-                  {desc} · {ok ? '✓ Good' : 'Needs work'}
-                </p>
-              </div>
-            );
-          })}
+        {/* Single focus bar */}
+        <div className="w-full max-w-sm rounded-lg border bg-black/40 p-3"
+          style={{ borderColor: isGood ? '#22d3ee40' : '#f8717130' }}>
+          <div className="flex justify-between text-gray-300 text-sm">
+            <span>Focus</span>
+            <span style={{ color: isGood ? '#22d3ee' : '#f87171' }} className="font-semibold">{Math.round(metrics.focus * 100)}%</span>
+          </div>
+          <div className="mt-2 h-2 rounded-full bg-gray-800">
+            <div className="h-full rounded-full transition-all duration-300"
+              style={{ width: `${Math.round(metrics.focus * 100)}%`, background: isGood ? '#22d3ee' : '#f87171' }} />
+          </div>
+          <p className="mt-1 text-xs" style={{ color: isGood ? '#22d3ee90' : '#f8717190' }}>
+            Frontal engagement · {isGood ? '✓ Good' : 'Needs work'}
+          </p>
         </div>
       </div>
     );
   }
 
-  if (selectedActivity === 'neuro-drive') {
-    const speedFraction = clamp(metrics.focus * 0.7 + metrics.control * 0.3);
-    const speedKmh = Math.round(speedFraction * 220);
-    const raceProgress = clamp(progressValue);
-    const isFinished = raceProgress >= 1.0;
-    const remainingPct = Math.max(0, 100 - Math.round(raceProgress * 100));
-
-    // Car swerves when stability is low; stays centred when focus is high
-    const instability = Math.max(0, 0.75 - metrics.stability);
-    const swerveAmp = instability * 85;
-    const swerveFreq = 0.4 + instability * 1.2; // Hz
-    const t = Date.now() / 1000;
-    const rawDrift = metrics.stability > 0.70 ? 0 : Math.sin(t * swerveFreq * Math.PI * 2) * swerveAmp;
-    const edgeWarning = Math.abs(rawDrift) > 68;
-
-    const scrollMs = Math.max(1200 - speedKmh * 4, 240);
-    const engineMs = Math.max(650 - speedKmh * 1.6, 220);
-    const flameLength = 8 + speedFraction * 18;
-
-    return (
-      <div className="mx-auto w-full max-w-4xl space-y-4">
-        <style>{`
-          @keyframes nd-road-scroll {
-            from { background-position-y: 0; }
-            to   { background-position-y: 220px; }
-          }
-          @keyframes nd-engine {
-            0%, 100% { transform: translateY(0px) translateX(var(--nd-drift, 0px)); }
-            50%       { transform: translateY(-2px) translateX(var(--nd-drift, 0px)); }
-          }
-          @keyframes nd-speed-line {
-            from { transform: translateY(0); opacity: 0; }
-            15%  { opacity: 1; }
-            to   { transform: translateY(18px); opacity: 0; }
-          }
-          @keyframes nd-pulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
-            70%       { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
-          }
-        `}</style>
-
-        <div className="relative overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-950 p-4">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(56,189,248,0.12),transparent_45%)]" />
-
-          {/* ── Mini-map track strip ─────────────────────────────── */}
-          <div className="relative mb-3 h-8 overflow-hidden rounded-lg border border-slate-700/60 bg-slate-900">
-            <div className="absolute inset-y-0 left-0 right-0 flex items-center px-2 gap-1">
-              <span className="text-[10px] text-slate-400 shrink-0">START</span>
-              <div className="relative flex-1 h-3 rounded-full bg-slate-800 mx-1">
-                {/* Completed distance fill */}
-                <div className="h-full rounded-full bg-gradient-to-r from-cyan-600 to-emerald-500 transition-all duration-500"
-                  style={{ width: `${raceProgress * 100}%` }} />
-                {/* Car icon on track */}
-                <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 flex items-center justify-center transition-all duration-500"
-                  style={{ left: `${raceProgress * 100}%` }}>
-                  <div className="w-3 h-2 rounded-sm bg-cyan-300 border border-cyan-200/60" />
-                </div>
-              </div>
-              <span className="text-[10px] text-emerald-400 shrink-0">FINISH</span>
-            </div>
-            <div className="absolute right-14 inset-y-0 flex items-center">
-              <span className="text-[10px] font-semibold text-emerald-300">{Math.round(raceProgress * 100)}%</span>
-            </div>
-          </div>
-
-          {/* ── Perspective road ─────────────────────────────────── */}
-          <div className="relative h-[26rem] overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900">
-            {/* Road surface */}
-            <div className="absolute inset-0"
-              style={{
-                clipPath: 'polygon(14% 100%, 86% 100%, 62% 0%, 38% 0%)',
-                background: 'linear-gradient(to bottom, rgba(71,85,105,0.35), rgba(15,23,42,0.95))',
-              }} />
-            {/* Road markings */}
-            <div className="absolute inset-0"
-              style={{
-                clipPath: 'polygon(14% 100%, 86% 100%, 62% 0%, 38% 0%)',
-                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(148,163,184,0.22) 0px, rgba(148,163,184,0.22) 6px, transparent 6px, transparent 34px)',
-                animation: `nd-road-scroll ${scrollMs}ms linear infinite`,
-              }} />
-            {/* Kerbs */}
-            <div className="absolute inset-y-0 left-[14%] w-2 bg-gradient-to-b from-amber-200/80 via-amber-300/50 to-amber-400/70" />
-            <div className="absolute inset-y-0 right-[14%] w-2 bg-gradient-to-b from-amber-200/80 via-amber-300/50 to-amber-400/70" />
-            {/* Centre dashes */}
-            <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2"
-              style={{
-                backgroundImage: 'repeating-linear-gradient(to bottom, rgba(226,232,240,0.9) 0px, rgba(226,232,240,0.9) 20px, transparent 20px, transparent 58px)',
-                animation: `nd-road-scroll ${Math.max(scrollMs * 0.75, 180)}ms linear infinite`,
-              }} />
-
-            {/* Speed readout */}
-            <div className="absolute left-4 top-4 rounded-lg border border-cyan-300/40 bg-slate-950/75 px-3 py-2 backdrop-blur-sm">
-              <p className="text-[10px] tracking-[0.2em] text-cyan-200">SPEED</p>
-              <p className="text-2xl font-semibold text-cyan-100">{speedKmh}<span className="ml-1 text-xs font-normal text-cyan-300">km/h</span></p>
-            </div>
-
-            {/* Stability readout */}
-            <div className="absolute right-4 top-4 rounded-lg border border-slate-600/70 bg-slate-950/80 px-3 py-2 backdrop-blur-sm text-center">
-              <p className="text-[10px] tracking-[0.18em] text-slate-300">STABILITY</p>
-              <p className={`text-xl font-semibold mt-1 ${metrics.stability > 0.7 ? 'text-emerald-300' : metrics.stability > 0.45 ? 'text-amber-300' : 'text-red-300'}`}>
-                {Math.round(metrics.stability * 100)}%
-              </p>
-            </div>
-
-            {/* Horizon gradient */}
-            <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-slate-950 via-slate-950/90 to-transparent" />
-
-            {/* ── Rear-view car ──────────────────────────────────── */}
-            <div
-              className="absolute bottom-8 transition-[left] duration-150"
-              style={{ left: `calc(50% - 40px + ${rawDrift}px)` }}
-              key="car"
-            >
-              <div className="relative w-[80px]"
-                style={{ animation: `nd-engine ${engineMs}ms ease-in-out infinite` }}>
-
-                {/* Edge warning label */}
-                {edgeWarning && (
-                  <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded-full bg-red-500/25 px-2 py-0.5 text-[10px] font-semibold text-red-200 whitespace-nowrap">
-                    OFF TRACK
-                  </div>
-                )}
-
-                {/* Car body — rear view */}
-                <div className="relative mx-auto w-[72px]">
-                  {/* Spoiler */}
-                  <div className="absolute -top-1.5 inset-x-1 h-2 rounded-sm bg-slate-600 border border-slate-500/50" />
-                  {/* Main body */}
-                  <div className="relative h-[48px] rounded-t-xl rounded-b-lg border border-blue-600/40 bg-gradient-to-b from-blue-700 via-blue-800 to-blue-950 shadow-[0_8px_24px_rgba(37,99,235,0.4)]">
-                    {/* Rear window */}
-                    <div className="absolute inset-x-4 top-2 h-[16px] rounded-sm bg-slate-200/15 border border-slate-300/20" />
-                    {/* Tail lights */}
-                    <div className="absolute bottom-2 left-1 h-3 w-[18px] rounded-sm bg-red-500" style={{ boxShadow: '0 0 7px rgba(239,68,68,0.85)' }} />
-                    <div className="absolute bottom-2 right-1 h-3 w-[18px] rounded-sm bg-red-500" style={{ boxShadow: '0 0 7px rgba(239,68,68,0.85)' }} />
-                    {/* License plate */}
-                    <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 h-2 w-[28px] rounded-sm bg-white/75" />
-                  </div>
-                  {/* Wheels */}
-                  <div className="absolute -bottom-1 -left-2 h-5 w-5 rounded-full bg-slate-900 border-2 border-slate-600 ring-1 ring-slate-700/60" />
-                  <div className="absolute -bottom-1 -right-2 h-5 w-5 rounded-full bg-slate-900 border-2 border-slate-600 ring-1 ring-slate-700/60" />
-                  {/* Exhaust flames */}
-                  {speedFraction > 0.15 && (
-                    <div className="absolute left-1/2 top-full -z-10 w-5 -translate-x-1/2 rounded-b-full bg-gradient-to-b from-orange-200 via-amber-400 to-transparent"
-                      style={{ height: `${flameLength}px`, opacity: 0.5 + speedFraction * 0.4 }} />
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Speed lines */}
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i}
-                className="absolute left-1/2 h-5 w-[2px] -translate-x-1/2 rounded-full bg-cyan-200"
-                style={{
-                  bottom: `${24 + i * 10}%`,
-                  marginLeft: `${(i - 2.5) * 28 + rawDrift * 0.18}px`,
-                  opacity: speedFraction * (0.12 + i * 0.05),
-                  animation: `nd-speed-line ${Math.max(380 - speedKmh, 90)}ms linear infinite`,
-                  animationDelay: `${i * 65}ms`,
-                }}
-              />
-            ))}
-
-            {/* Finish overlay */}
-            {isFinished && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm">
-                <div className="rounded-xl border border-emerald-300/60 bg-emerald-500/15 px-8 py-5 text-center">
-                  <p className="text-xs tracking-[0.28em] text-emerald-200">LAP TIME</p>
-                  <p className="mt-2 text-4xl font-semibold text-emerald-100">{lapTimeSeconds?.toFixed(2)}s</p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Stats strip */}
-          <div className="relative z-10 mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-            <div className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-cyan-200">Speed</p>
-              <p className="mt-1 text-lg font-semibold text-cyan-100">{speedKmh} km/h</p>
-            </div>
-            <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-emerald-200">Track Progress</p>
-              <p className="mt-1 text-lg font-semibold text-emerald-100">{Math.round(raceProgress * 100)}%</p>
-            </div>
-            <div className={`rounded-xl border p-3 ${metrics.stability > 0.7 ? 'border-emerald-400/30 bg-emerald-500/10' : metrics.stability > 0.45 ? 'border-amber-400/30 bg-amber-500/10' : 'border-red-400/30 bg-red-500/10'}`}>
-              <p className={`text-xs uppercase tracking-wide ${metrics.stability > 0.7 ? 'text-emerald-200' : metrics.stability > 0.45 ? 'text-amber-200' : 'text-red-200'}`}>Stability</p>
-              <p className={`mt-1 text-lg font-semibold ${metrics.stability > 0.7 ? 'text-emerald-100' : metrics.stability > 0.45 ? 'text-amber-100' : 'text-red-100'}`}>{Math.round(metrics.stability * 100)}%</p>
-            </div>
-            <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-3">
-              <p className="text-xs uppercase tracking-wide text-amber-200">Remaining</p>
-              <p className="mt-1 text-lg font-semibold text-amber-100">{remainingPct}%</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+  if (selectedActivity === 'ocean-waves') {
+    return <OceanWavesVisualization metrics={metrics} />;
   }
 
-  if (selectedActivity === 'signal-shield') {
-    const shieldOpacity = 0.2 + progressValue * 0.8;
-    const shieldScale = 0.8 + metrics.symmetry * 0.35;
-    const shieldColor = progressValue > 0.7 ? '#34d399' : progressValue > 0.4 ? '#60a5fa' : '#f472b6';
-    return (
-      <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-5 rounded-2xl border border-emerald-400/30 bg-emerald-500/5 p-6">
-        <div className="relative flex h-64 w-64 items-center justify-center">
-          {/* Outer rotating ring only when symmetry is high */}
-          {metrics.symmetry > 0.6 && (
-            <div
-              className="absolute h-72 w-72 rounded-full border border-dashed border-emerald-400/40"
-              style={{ animation: `spin ${3 - metrics.symmetry * 2}s linear infinite` }}
-            />
-          )}
-          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-          <div
-            className="absolute transition-all duration-300"
-            style={{ transform: `scale(${shieldScale})`, opacity: shieldOpacity }}
-          >
-            <svg viewBox="0 0 100 120" width="200" height="240">
-              <path
-                d="M50 5 L95 25 L95 65 Q95 95 50 115 Q5 95 5 65 L5 25 Z"
-                fill="none"
-                stroke={shieldColor}
-                strokeWidth="3"
-                filter="url(#glow)"
-              />
-              <defs>
-                <filter id="glow">
-                  <feGaussianBlur stdDeviation="2" result="blur" />
-                  <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-                </filter>
-              </defs>
-              <path
-                d="M50 15 L85 30 L85 65 Q85 90 50 107 Q15 90 15 65 L15 30 Z"
-                fill={shieldColor}
-                fillOpacity="0.08"
-                stroke={shieldColor}
-                strokeWidth="1.5"
-                strokeOpacity="0.4"
-              />
-            </svg>
-          </div>
-          <span className="text-3xl font-bold" style={{ color: shieldColor }}>
-            {Math.round(progressValue * 100)}%
-          </span>
-        </div>
-        <div className="grid w-full grid-cols-2 gap-3 text-sm">
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
-            Shield Strength<br />
-            <span className="text-xl text-emerald-300">{Math.round(progressValue * 100)}%</span>
-            <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-emerald-400 transition-all duration-300" style={{ width: `${Math.round(progressValue * 100)}%` }} /></div>
-          </div>
-          <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
-            Frontal Symmetry<br />
-            <span className="text-xl text-emerald-300">{Math.round(metrics.symmetry * 100)}%</span>
-            <div className="mt-2 h-1.5 rounded-full bg-gray-800"><div className="h-full rounded-full bg-teal-400 transition-all duration-300" style={{ width: `${Math.round(metrics.symmetry * 100)}%` }} /></div>
-          </div>
-        </div>
-      </div>
-    );
+  if (selectedActivity === 'balance-bar') {
+    return <BalanceBarVisualization metrics={metrics} eegData={eegData} />;
   }
 
   // ── Pulse Pilot ────────────────────────────────────────────────────────
-  const wavePoints = ppgData.slice(-180);
+  const ppgWindow = ppgData.slice(-PPG_FS * 10);
+  const estBpm = estimateBpm(ppgWindow);
+
+  const wavePoints = ppgData.slice(-PPG_FS * 5); // 5 seconds
   const waveMin = Math.min(...wavePoints, 0);
   const waveMax = Math.max(...wavePoints, 1);
   const waveRange = Math.max(waveMax - waveMin, 1);
@@ -615,11 +625,6 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
   const coherence = clamp(metrics.ppgRegulation * 0.7 + metrics.calm * 0.3);
   const regulationColor = metrics.ppgRegulation > 0.72 ? '#fb7185' : metrics.ppgRegulation > 0.45 ? '#f59e0b' : '#94a3b8';
   const stabilityLabel = metrics.ppgRegulation > 0.72 ? 'Smooth — excellent coherence' : metrics.ppgRegulation > 0.45 ? 'Moderate — keep breathing slowly' : 'Irregular — slow your breath';
-  let peakCount = 0;
-  for (let i = 1; i < smoothedWave.length - 1; i++) {
-    if (smoothedWave[i] > smoothedWave[i - 1] && smoothedWave[i] > smoothedWave[i + 1] && smoothedWave[i] > 0.68) peakCount++;
-  }
-  const estBpm = Math.round((peakCount / 3) * 60); // 3s window
 
   return (
     <div className="mx-auto w-full max-w-4xl space-y-4 rounded-2xl border border-rose-400/40 bg-gradient-to-b from-rose-500/8 via-slate-950 to-slate-950 p-6">
@@ -654,14 +659,11 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
         <div className="flex flex-col items-center gap-3 rounded-xl border border-rose-300/30 bg-slate-900/70 p-4">
           <p className="text-xs uppercase tracking-[0.22em] text-rose-200">Breathing Guide</p>
           <div className="relative flex h-40 w-40 items-center justify-center">
-            {/* Outer expand ring */}
             <div className="absolute inset-0 rounded-full border border-rose-300/25"
               style={{ animation: `pp-ring 12s linear ${33 / 100 * 12}s infinite`, opacity: coherence * 0.5 }} />
-            {/* Breathing circle */}
             <div className="absolute inset-6 rounded-full"
               style={{ animation: 'pp-breathe 12s ease-in-out infinite',
                 boxShadow: `0 0 32px rgba(251,113,133,${0.2 + coherence * 0.4})` }} />
-            {/* Phase labels — fade in/out in sync */}
             <div className="relative z-10 text-center select-none">
               <p className="text-xs font-semibold text-blue-200" style={{ animation: 'pp-label-inhale 12s ease-in-out infinite' }}>Inhale</p>
               <p className="text-xs font-semibold text-purple-300 absolute top-0 left-0 right-0" style={{ animation: 'pp-label-hold1 12s ease-in-out infinite' }}>Hold</p>
@@ -681,6 +683,7 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
         <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(248,113,113,0.06),rgba(15,23,42,0.95))]" />
           <p className="absolute left-3 top-2 text-xs uppercase tracking-[0.2em] text-slate-400">Heart Rhythm Stream</p>
+          <p className="absolute right-3 top-2 text-xs text-slate-500">Last 5 seconds</p>
           {linePoints.length > 2 ? (
             <svg viewBox={`0 0 ${svgW} ${svgH}`} className="h-52 w-full" preserveAspectRatio="none">
               <defs>
@@ -724,7 +727,7 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
         </div>
         <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
           <p className="text-xs text-gray-400">Est. Heart Rate</p>
-          <p className="mt-1 text-xl font-semibold text-orange-300">{estBpm > 0 ? `${estBpm} bpm` : '—'}</p>
+          <p className="mt-1 text-xl font-semibold text-orange-300">{estBpm !== null ? `${estBpm} bpm` : '—'}</p>
           <p className="mt-3 text-xs text-gray-500">Target: 50–70 bpm during exercise</p>
         </div>
       </div>
@@ -745,22 +748,22 @@ export default function CognitiveTrainingView({
   onStopSession,
   onPauseToggle,
   isPaused,
+  isBreakMode = false,
+  onReturnToSession,
 }: CognitiveTrainingViewProps) {
   const [phase, setPhase] = useState<Phase>('select');
-  const [selectedActivity, setSelectedActivity] = useState<ActivityId>('neural-ball');
-  const [durationMinutes, setDurationMinutes] = useState(3);
+  const [selectedGoal, setSelectedGoal] = useState<GoalId | null>(null);
+  const [durationMinutes, setDurationMinutes] = useState(isBreakMode ? 5 : 3);
   const [remainingSeconds, setRemainingSeconds] = useState(durationMinutes * 60);
   const [progressValue, setProgressValue] = useState(0.25);
   const [sessionStats, setSessionStats] = useState<Array<{ focus: number; calm: number; control: number; ppg: number; symmetry: number }>>([]);
   const [peakValue, setPeakValue] = useState(0);
-  const [lapTimeSeconds, setLapTimeSeconds] = useState<number | null>(null);
   const lapTimeRef = useRef<number | null>(null);
-  const distanceCoveredRef = useRef(0);
-  const lastMetricsUpdateRef = useRef(Date.now());
   const metrics = useMemo(() => calculateBrainMetrics(eegData, ppgData, predictedVAD), [eegData, ppgData, predictedVAD]);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const selectedMeta = ACTIVITIES.find((activity) => activity.id === selectedActivity)!;
+  const selectedActivity: ActivityId = selectedGoal ? GOAL_TO_ACTIVITY[selectedGoal] : 'neural-ball';
+  const selectedGoalMeta = GOALS.find(g => g.id === selectedGoal);
 
   useEffect(() => {
     setRemainingSeconds(durationMinutes * 60);
@@ -770,24 +773,9 @@ export default function CognitiveTrainingView({
     if (phase !== 'running') return;
 
     const newProgress = (() => {
-      // Neural ball: geometric mean — BOTH focus and calm must be high
-      if (selectedActivity === 'neural-ball') {
-        return clamp(Math.sqrt(metrics.focus * metrics.calm));
-      }
-      // Neuro drive: accumulate distance over time based on focus speed
-      if (selectedActivity === 'neuro-drive') {
-        const now = Date.now();
-        const dt = Math.min((now - lastMetricsUpdateRef.current) / 1000, 0.5);
-        lastMetricsUpdateRef.current = now;
-        const speedFraction = clamp(metrics.focus * 0.7 + metrics.control * 0.3);
-        const trackSpeed = 1.0 / (durationMinutes * 60 * 0.6);
-        distanceCoveredRef.current = Math.min(
-          distanceCoveredRef.current + speedFraction * trackSpeed * dt,
-          1.0,
-        );
-        return distanceCoveredRef.current;
-      }
-      if (selectedActivity === 'signal-shield') return clamp(metrics.symmetry * 0.5 + metrics.stability * 0.5);
+      if (selectedActivity === 'neural-ball') return clamp(metrics.focus);
+      if (selectedActivity === 'ocean-waves') return clamp(metrics.calm);
+      if (selectedActivity === 'balance-bar') return clamp(metrics.symmetry);
       return clamp(metrics.ppgRegulation * 0.55 + metrics.calm * 0.25 + metrics.control * 0.2);
     })();
 
@@ -804,7 +792,6 @@ export default function CognitiveTrainingView({
       },
     ].slice(-1000));
 
-    // Record snapshot to session store for the shared results page
     addEEGSnapshot({
       focus: clamp(metrics.focus),
       calm: clamp(metrics.calm),
@@ -812,14 +799,7 @@ export default function CognitiveTrainingView({
       symmetry: clamp(metrics.symmetry),
       ppg: clamp(metrics.ppgRegulation),
     });
-
-    // For neuro-drive: record lap time when car reaches finish
-    if (selectedActivity === 'neuro-drive' && newProgress >= 1.0 && lapTimeRef.current === null) {
-      const elapsedTime = durationMinutes * 60 - remainingSeconds;
-      lapTimeRef.current = elapsedTime;
-      setLapTimeSeconds(elapsedTime);
-    }
-  }, [metrics, phase, selectedActivity, durationMinutes, remainingSeconds]);
+  }, [metrics, phase, selectedActivity]);
 
   useEffect(() => {
     if (phase !== 'running') return;
@@ -851,10 +831,7 @@ export default function CognitiveTrainingView({
     setPeakValue(0);
     setProgressValue(0.25);
     setRemainingSeconds(durationMinutes * 60);
-    distanceCoveredRef.current = 0;
-    lastMetricsUpdateRef.current = Date.now();
     lapTimeRef.current = null;
-    setLapTimeSeconds(null);
     setPhase('running');
   };
 
@@ -868,17 +845,28 @@ export default function CognitiveTrainingView({
 
   const handleStopSession = () => {
     if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
-    setCognitiveData(sessionStats, selectedActivity, peakValue, lapTimeSeconds);
+    setCognitiveData(sessionStats, selectedActivity, peakValue, null);
     onStopSession?.();
   };
 
   const resetToSelection = () => {
     setPhase('select');
+    setSelectedGoal(null);
     setRemainingSeconds(durationMinutes * 60);
     setSessionStats([]);
     setPeakValue(0);
-    setLapTimeSeconds(null);
     lapTimeRef.current = null;
+  };
+
+  const handleGoalSelect = (goalId: GoalId) => {
+    setSelectedGoal(goalId);
+    // In break mode, immediately start; in standalone, start immediately too (simple UX)
+    setSessionStats([]);
+    setPeakValue(0);
+    setProgressValue(0.25);
+    setRemainingSeconds(durationMinutes * 60);
+    lapTimeRef.current = null;
+    setPhase('running');
   };
 
   const avgFocus = average(sessionStats.map((sample) => sample.focus));
@@ -891,16 +879,30 @@ export default function CognitiveTrainingView({
     <div className="min-h-screen bg-black text-white">
       <header className="w-full border-b border-zinc-800 bg-black py-4">
         <div className="container mx-auto flex items-center justify-between px-8">
-          <button onClick={onBackToHome} className="text-3xl font-light hover:text-gray-300">NeuroVibe</button>
+          <div className="flex items-center gap-3">
+            <button onClick={onBackToHome} className="text-3xl font-light hover:text-gray-300">NeuroVibe</button>
+            {isBreakMode && (
+              <span className="rounded-full border border-violet-500/50 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300">On Break</span>
+            )}
+          </div>
           <div className="flex items-center gap-4 text-sm">
             <span className="text-gray-400">{sampleCount} samples</span>
             <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-4 py-1 text-cyan-200">{connectionStatus}</span>
-            <button
-              onClick={onPauseToggle}
-              className={`rounded-lg px-4 py-2 font-semibold ${isPaused ? 'bg-green-500 text-white' : 'bg-orange-500 text-white'}`}
-            >
-              {isPaused ? 'Resume' : 'Pause'}
-            </button>
+            {isBreakMode ? (
+              <button
+                onClick={onReturnToSession}
+                className="rounded-lg bg-violet-600 hover:bg-violet-500 px-4 py-2 font-semibold text-white transition-colors"
+              >
+                Return to Session
+              </button>
+            ) : (
+              <button
+                onClick={onPauseToggle}
+                className={`rounded-lg px-4 py-2 font-semibold ${isPaused ? 'bg-green-500 text-white' : 'bg-orange-500 text-white'}`}
+              >
+                {isPaused ? 'Resume' : 'Pause'}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -926,48 +928,69 @@ export default function CognitiveTrainingView({
         {phase === 'select' && (
           <div className="space-y-8">
             <div className="text-center">
-              <h1 className="text-4xl font-light">Improve Cognitive Power</h1>
-              <p className="mx-auto mt-3 max-w-3xl text-gray-400">Choose a brain activity. After each run you will get a performance breakdown from every available Muse channel (TP9, AF7, AF8, TP10), VAD state, and PPG regulation when available.</p>
+              <h1 className="text-4xl font-light">
+                {isBreakMode ? 'Take a Brain Break' : 'What would you like to work on?'}
+              </h1>
+              <p className="mx-auto mt-3 max-w-2xl text-gray-400">
+                {isBreakMode
+                  ? 'Choose a short mental exercise to refresh your mind before returning to the music session.'
+                  : 'Choose a goal. Each exercise uses real-time EEG signals from your Muse headset.'}
+              </p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              {ACTIVITIES.map((activity) => (
+            {/* Duration selector — only in standalone mode */}
+            {!isBreakMode && (
+              <div className="flex justify-center">
+                <label className="text-sm text-gray-300 flex items-center gap-3">
+                  Duration
+                  <select
+                    className="rounded-lg border border-gray-700 bg-black px-3 py-2"
+                    value={durationMinutes}
+                    onChange={(event) => setDurationMinutes(parseInt(event.target.value, 10))}
+                  >
+                    {[3, 4, 5].map((option) => <option key={option} value={option}>{option} minutes</option>)}
+                  </select>
+                </label>
+              </div>
+            )}
+
+            {/* Goal cards 2×2 grid */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              {GOALS.map((goal) => (
                 <button
-                  key={activity.id}
-                  onClick={() => setSelectedActivity(activity.id)}
-                  className={`rounded-2xl border p-6 text-left transition-colors ${selectedActivity === activity.id ? 'border-fuchsia-400 bg-fuchsia-500/10' : 'border-gray-800 bg-gray-900/40 hover:border-gray-600'}`}
+                  key={goal.id}
+                  onClick={() => handleGoalSelect(goal.id)}
+                  className={`rounded-2xl border p-6 text-left transition-all hover:scale-[1.02] border-gray-800 bg-gray-900/40 hover:border-${goal.color}-500/50 hover:bg-${goal.color}-500/5`}
                 >
-                  <h3 className="text-xl font-medium">{activity.title}</h3>
-                  <p className="mt-2 text-sm text-gray-300">{activity.description}</p>
-                  <p className="mt-3 text-xs uppercase tracking-widest text-fuchsia-300">Signals: {activity.channels}</p>
+                  <div className="flex items-start gap-4">
+                    <span className="text-4xl">{goal.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-xl font-semibold text-white">{goal.title}</h3>
+                      <p className={`mt-0.5 text-sm font-medium text-${goal.color}-300`}>{goal.subtitle}</p>
+                      <p className="mt-2 text-sm text-gray-400">{goal.description}</p>
+                    </div>
+                  </div>
                 </button>
               ))}
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-gray-800 bg-gray-900/40 p-6">
-              <label className="text-sm text-gray-300">Duration
-                <select
-                  className="ml-3 rounded-lg border border-gray-700 bg-black px-3 py-2"
-                  value={durationMinutes}
-                  onChange={(event) => setDurationMinutes(parseInt(event.target.value, 10))}
-                >
-                  {[3, 4, 5].map((option) => <option key={option} value={option}>{option} minutes</option>)}
-                </select>
-              </label>
-              <button onClick={startSession} className="rounded-full bg-white px-6 py-3 font-semibold text-black">Start Activity</button>
             </div>
           </div>
         )}
 
-        {phase === 'running' && (
+        {phase === 'running' && selectedGoalMeta && (
           <div className="space-y-8 text-center">
             <div>
-              <h2 className="text-3xl font-light">{selectedMeta.title}</h2>
-              <p className="mt-2 text-gray-400">{selectedMeta.description}</p>
+              <h2 className="text-3xl font-light">{selectedGoalMeta.title}</h2>
+              <p className="mt-2 text-gray-400">{selectedGoalMeta.description}</p>
               <p className="mt-2 text-sm text-fuchsia-300">{Math.floor(remainingSeconds / 60)}:{String(remainingSeconds % 60).padStart(2, '0')} remaining</p>
             </div>
 
-            <RunningVisualization selectedActivity={selectedActivity} progressValue={progressValue} metrics={metrics} ppgData={ppgData} lapTimeSeconds={lapTimeSeconds} />
+            <RunningVisualization
+              selectedActivity={selectedActivity}
+              progressValue={progressValue}
+              metrics={metrics}
+              ppgData={ppgData}
+              eegData={eegData}
+            />
 
             <div className="mx-auto grid max-w-3xl grid-cols-2 gap-3 text-sm md:grid-cols-4">
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">Focus<br />{Math.round(clamp(metrics.focus) * 100)}%</div>
@@ -976,12 +999,18 @@ export default function CognitiveTrainingView({
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3">PPG Reg.<br />{Math.round(clamp(metrics.ppgRegulation) * 100)}%</div>
             </div>
 
-            <button onClick={finishEarly} className="rounded-full border border-gray-700 px-6 py-2 text-sm text-gray-300 hover:border-gray-500 transition-colors">Finish now</button>
-            <button onClick={handleStopSession} className="rounded-full border border-red-700 bg-red-600/10 px-6 py-2 text-sm text-red-400 hover:bg-red-600/20 transition-colors">Stop Session</button>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <button onClick={finishEarly} className="rounded-full border border-gray-700 px-6 py-2 text-sm text-gray-300 hover:border-gray-500 transition-colors">Finish now</button>
+              {isBreakMode ? (
+                <button onClick={onReturnToSession} className="rounded-full border border-violet-600 bg-violet-600/10 px-6 py-2 text-sm text-violet-400 hover:bg-violet-600/20 transition-colors">Return to Session</button>
+              ) : (
+                <button onClick={handleStopSession} className="rounded-full border border-red-700 bg-red-600/10 px-6 py-2 text-sm text-red-400 hover:bg-red-600/20 transition-colors">Stop Session</button>
+              )}
+            </div>
           </div>
         )}
 
-        {phase === 'results' && (() => {
+        {phase === 'results' && selectedGoalMeta && (() => {
           const insights = getActivityInsights(
             selectedActivity,
             avgFocus,
@@ -990,7 +1019,7 @@ export default function CognitiveTrainingView({
             avgSymmetry,
             avgPpg,
             peakValue,
-            lapTimeSeconds,
+            null,
           );
           const colorMap = { excellent: 'emerald', good: 'blue', fair: 'amber', 'needs-work': 'red' };
           const colorClass = colorMap[insights.quality];
@@ -999,7 +1028,7 @@ export default function CognitiveTrainingView({
             <div className="mx-auto max-w-5xl space-y-8">
               <div className="text-center">
                 <h2 className="text-4xl font-light">Session Complete</h2>
-                <p className="mt-2 text-gray-400">Deep analysis of your {selectedMeta.title} session</p>
+                <p className="mt-2 text-gray-400">Deep analysis of your {selectedGoalMeta.title} session</p>
               </div>
 
               {/* Activity-specific insights */}
@@ -1070,8 +1099,19 @@ export default function CognitiveTrainingView({
                 </div>
               </div>
 
-              <div className="flex items-center justify-center gap-4">
-                <button onClick={resetToSelection} className="rounded-full bg-white px-6 py-3 font-semibold text-black hover:bg-gray-200 transition-colors">Play Another Activity</button>
+              <div className="flex flex-wrap items-center justify-center gap-4">
+                {/* Return to Session — primary in break mode */}
+                {isBreakMode && (
+                  <button
+                    onClick={onReturnToSession}
+                    className="rounded-full bg-violet-600 hover:bg-violet-500 px-7 py-3 font-semibold text-white transition-colors"
+                  >
+                    Return to Session
+                  </button>
+                )}
+                <button onClick={resetToSelection} className="rounded-full bg-white px-6 py-3 font-semibold text-black hover:bg-gray-200 transition-colors">
+                  {isBreakMode ? 'Try Another Exercise' : 'Play Another Activity'}
+                </button>
                 <button onClick={onBackToHome} className="rounded-full border border-gray-600 px-6 py-3 font-semibold text-gray-300 hover:border-gray-400 transition-colors">Back to Home</button>
               </div>
             </div>
@@ -1081,4 +1121,3 @@ export default function CognitiveTrainingView({
     </div>
   );
 }
-

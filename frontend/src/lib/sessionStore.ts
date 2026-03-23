@@ -20,6 +20,11 @@ export interface SongRecord {
   score: number;
 }
 
+export interface BreakRecord {
+  startMs: number;  // ms since session start
+  endMs: number;    // ms since session start (0 until break ends)
+}
+
 export interface EEGSnapshot {
   t: number;          // seconds from session start
   focus: number;
@@ -50,6 +55,7 @@ export interface SessionData {
   lapTimeSeconds?: number | null;
   // Common
   eegSnapshots: EEGSnapshot[];
+  breaks: BreakRecord[];
 }
 
 const EMPTY: SessionData = {
@@ -61,6 +67,7 @@ const EMPTY: SessionData = {
   peakValue: 0,
   lapTimeSeconds: null,
   eegSnapshots: [],
+  breaks: [],
 };
 
 let _session: SessionData = { ...EMPTY };
@@ -126,6 +133,18 @@ export function finaliseSession(): SessionData {
 /** Read the current session data (mutable reference — copy if you need a snapshot). */
 export function getSession(): SessionData {
   return _session;
+}
+
+export function startBreak(): void {
+  const ms = _session.startTime > 0 ? Date.now() - _session.startTime : 0;
+  _session.breaks.push({ startMs: ms, endMs: 0 });
+}
+
+export function endBreak(): void {
+  const last = _session.breaks[_session.breaks.length - 1];
+  if (last && last.endMs === 0) {
+    last.endMs = _session.startTime > 0 ? Date.now() - _session.startTime : 0;
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

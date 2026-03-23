@@ -7,7 +7,7 @@ import { io, Socket } from 'socket.io-client';
 import EmotionView from "@/components/EmotionView";
 import CognitiveTrainingView from "@/components/CognitiveTrainingView";
 import { PlayerRef } from "@/components/player";
-import { initSession, finaliseSession, addEEGSnapshot } from "@/lib/sessionStore";
+import { initSession, finaliseSession, addEEGSnapshot, getSession, startBreak, endBreak } from "@/lib/sessionStore";
 
 interface EEGData {
   tp9: number;
@@ -38,6 +38,9 @@ export default function EmotionPage() {
   const [valenceData, setValenceData] = useState<{ valence: "POSITIVE" | "NEGATIVE" | "UNCERTAIN"; smoothed_score: number; n_windows: number } | null>(null);
   const [ppgAvailable, setPpgAvailable] = useState<boolean | null>(null);
   const [sessionMode, setSessionMode] = useState<string>('focus');
+  const [showBreakPrompt, setShowBreakPrompt] = useState(false);
+  const [inCognitiveBreak, setInCognitiveBreak] = useState(false);
+  const breakShownRef = useRef(false);
   const ppgAvailableRef = useRef<boolean | null>(null);
 
   const clientRef = useRef<MuseClient | null>(null);
@@ -87,6 +90,32 @@ export default function EmotionPage() {
     }, 5000);
     return () => clearInterval(id);
   }, [sessionMode]);
+
+  useEffect(() => {
+    if (sessionMode === 'cognitive') return;
+    const id = setInterval(() => {
+      if (breakShownRef.current) return;
+      const { startTime } = getSession();
+      if (startTime > 0 && Date.now() - startTime >= 15 * 60 * 1000) {
+        setShowBreakPrompt(true);
+        breakShownRef.current = true;
+      }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [sessionMode]);
+
+  const handleEnterBreak = () => {
+    setShowBreakPrompt(false);
+    playerRef.current?.pause();
+    startBreak();
+    setInCognitiveBreak(true);
+  };
+
+  const handleReturnFromBreak = () => {
+    endBreak();
+    setInCognitiveBreak(false);
+    playerRef.current?.resume();
+  };
 
   const handleStopSession = () => {
     finaliseSession();
@@ -517,6 +546,12 @@ export default function EmotionPage() {
           </div>
         </div>
       )}
+
+      {/* Break notification overlay */}
+      {showBreakPrompt && !inCognitiveBreak && (
+        <BreakPromptOverlay onAccept={handleEnterBreak} onDismiss={() => setShowBreakPrompt(false)} />
+      )}
+
       {sessionMode === 'cognitive' ? (
         <CognitiveTrainingView
           eegData={eegDataBuffer}
@@ -531,6 +566,24 @@ export default function EmotionPage() {
           onConnect={() => { void handleConnectMuse(); }}
           onBackToHome={handleBackToHome}
           onStopSession={handleStopSession}
+          isBreakMode={false}
+        />
+      ) : inCognitiveBreak ? (
+        <CognitiveTrainingView
+          eegData={eegDataBuffer}
+          ppgData={ppgDataBuffer}
+          predictedVAD={predictedVAD}
+          sampleCount={sampleCount}
+          connectionStatus={connectionStatus}
+          onPauseToggle={handlePauseToggle}
+          isPaused={isPaused}
+          needsConnect={needsConnect}
+          isConnecting={isConnecting}
+          onConnect={() => { void handleConnectMuse(); }}
+          onBackToHome={handleBackToHome}
+          onStopSession={handleStopSession}
+          isBreakMode={true}
+          onReturnToSession={handleReturnFromBreak}
         />
       ) : (
         <EmotionView
@@ -554,6 +607,31 @@ export default function EmotionPage() {
           valence={valenceData}
         />
       )}
+    </div>
+  );
+}
+
+function BreakPromptOverlay({ onAccept, onDismiss }: { onAccept: () => void; onDismiss: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center pb-8 pointer-events-none">
+      <div className="pointer-events-auto mx-4 max-w-sm w-full rounded-2xl border border-violet-500/40 bg-gray-950/95 backdrop-blur-lg p-5 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <span className="text-2xl">🧠</span>
+          <div className="flex-1">
+            <p className="font-semibold text-white text-sm">Time for a brain break?</p>
+            <p className="text-xs text-gray-400 mt-0.5">You&apos;ve been listening for 15 minutes. A quick mental exercise can help refresh your focus.</p>
+          </div>
+          <button onClick={onDismiss} className="text-gray-500 hover:text-gray-300 text-lg leading-none">✕</button>
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button onClick={onAccept} className="flex-1 rounded-xl bg-violet-600 hover:bg-violet-500 px-3 py-2 text-sm font-medium text-white transition-colors">
+            Take a Break
+          </button>
+          <button onClick={onDismiss} className="flex-1 rounded-xl border border-gray-700 hover:border-gray-600 px-3 py-2 text-sm text-gray-300 transition-colors">
+            Keep Listening
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

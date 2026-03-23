@@ -19,6 +19,7 @@ interface PlayerProps {
 
 export interface PlayerRef {
   pause: () => void;
+  resume: () => void;
   getCurrentTrack: () => { name: string; artist: string; uri: string; genre: string; albumArt?: string } | null;
 }
 
@@ -165,7 +166,12 @@ const Player = forwardRef<PlayerRef, PlayerProps>(({ emotion, valence, onTrackCh
       if (player && isPlaying) {
         void player.pause();
       }
-    }
+    },
+    resume: () => {
+      if (player) {
+        void player.togglePlay();
+      }
+    },
   }));
 
 

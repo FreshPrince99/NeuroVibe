@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSession, SessionData, SongRecord } from '@/lib/sessionStore';
+import FeedbackForm from '@/components/FeedbackForm';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -366,12 +367,30 @@ function CognitiveAnalysis({ session }: { session: SessionData }) {
 export default function ResultsPage() {
   const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+
+  // Session ID was saved by the emotion page when the session ended
+  const sessionId = typeof window !== 'undefined'
+    ? Number(sessionStorage.getItem('neurovibe_last_session_id') || '0') || null
+    : null;
+
+  const username = typeof window !== 'undefined'
+    ? sessionStorage.getItem('neurovibe_username')
+    : null;
 
   useEffect(() => {
     const s = getSession();
     if (!s.startTime) { router.replace('/'); return; }
     setSession(s);
   }, [router]);
+
+  const handleLogout = () => {
+    sessionStorage.removeItem('neurovibe_user_id');
+    sessionStorage.removeItem('neurovibe_username');
+    sessionStorage.removeItem('neurovibe_last_session_id');
+    router.push('/');
+  };
 
   if (!session) {
     return (
@@ -410,11 +429,30 @@ export default function ResultsPage() {
             NeuroVibe
           </button>
           <div className="flex items-center gap-3 text-sm text-gray-400">
+            {username && (
+              <>
+                <span className="rounded-full border border-purple-700/50 bg-purple-900/20 px-3 py-1 text-purple-300">
+                  {username}
+                </span>
+                <span className="text-gray-600">·</span>
+              </>
+            )}
             <span className="rounded-full border border-gray-700 px-3 py-1">{modeLabel(session.mode)}</span>
             <span className="text-gray-600">·</span>
             <span>{new Date(session.startTime).toLocaleString()}</span>
             <span className="text-gray-600">·</span>
             <span>{formatDuration(durationMs)}</span>
+            {username && (
+              <>
+                <span className="text-gray-600">·</span>
+                <button
+                  onClick={handleLogout}
+                  className="rounded-full border border-gray-700 px-3 py-1 text-xs text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors"
+                >
+                  Log out
+                </button>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -482,6 +520,29 @@ export default function ResultsPage() {
           <MusicDashboard session={session} />
         ) : (
           <CognitiveAnalysis session={session} />
+        )}
+
+        {/* ── Feedback ─────────────────────────────────────────────── */}
+        {!feedbackDone && !showFeedback && (
+          <div className="rounded-2xl border border-gray-700 bg-gray-900/30 p-5 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-white">Rate this session</p>
+              <p className="text-xs text-gray-400 mt-0.5">~2 minutes · helps evaluate the system</p>
+            </div>
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="rounded-full bg-white px-5 py-2 font-semibold text-black text-sm hover:bg-gray-200 transition-colors"
+            >
+              Give Feedback
+            </button>
+          </div>
+        )}
+
+        {showFeedback && !feedbackDone && (
+          <FeedbackForm
+            sessionId={sessionId}
+            onDone={() => { setShowFeedback(false); setFeedbackDone(true); }}
+          />
         )}
 
         {/* ── Actions ──────────────────────────────────────────────── */}

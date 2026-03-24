@@ -15,10 +15,14 @@ export default function SetupPage() {
     setIsClient(true);
   }, []);
 
-  // Check whether a user profile already exists on the backend
+  // Check whether a baseline already exists for the current user
   useEffect(() => {
     if (!isClient) return;
-    fetch('http://localhost:5000/user/exists')
+    const userId = sessionStorage.getItem('neurovibe_user_id');
+    const url = userId
+      ? `http://localhost:5000/user/exists?user_id=${userId}`
+      : 'http://localhost:5000/user/exists';
+    fetch(url)
       .then(r => r.json())
       .then(data => setNeedsCalibration(!data.exists))
       .catch(() => setNeedsCalibration(true)); // backend not running → assume first-time, show calibration

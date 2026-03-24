@@ -63,10 +63,18 @@ const GOALS: Array<{ id: GoalId; title: string; subtitle: string; description: s
   },
 ];
 
+interface EmotionScores {
+  focus: number;
+  stress: number;
+  relaxed: number;
+  tired: number;
+}
+
 interface CognitiveTrainingViewProps {
   eegData: EEGData[];
   ppgData: number[];
   predictedVAD?: VADData | null;
+  emotionScores?: EmotionScores | null;
   connectionStatus: string;
   sampleCount: number;
   needsConnect?: boolean;
@@ -136,46 +144,240 @@ function getActivityInsights(
   };
 }
 
-function SessionGraph({ data }: { data: Array<{ focus: number; calm: number; control: number }> }) {
+function SessionGraph({
+  data,
+  activity,
+  durationSeconds,
+}: {
+  data: Array<{ focus: number; calm: number; control: number; ppg: number; symmetry: number }>;
+  activity: ActivityId;
+  durationSeconds: number;
+}) {
   if (data.length === 0) return null;
-  const svgW = 600;
-  const svgH = 240;
-  const padding = 40;
-  const graphW = svgW - padding * 2;
-  const graphH = svgH - padding * 2;
 
-  const points = data.map((sample, i) => ({
-    x: padding + (i / Math.max(data.length - 1, 1)) * graphW,
-    focus: padding + graphH - clamp(sample.focus) * graphH,
-    calm: padding + graphH - clamp(sample.calm) * graphH,
-    control: padding + graphH - clamp(sample.control) * graphH,
-  }));
+  // Which metric is the star of this exercise
+  const primaryKey = activity === 'neural-ball' ? 'focus'
+    : activity === 'ocean-waves' ? 'calm'
+    : activity === 'balance-bar' ? 'symmetry'
+    : 'ppg';
 
-  const focusPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.focus}`).join(' ');
-  const calmPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.calm}`).join(' ');
-  const controlPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.control}`).join(' ');
+  const primaryLabel = activity === 'neural-ball' ? 'Focus'
+    : activity === 'ocean-waves' ? 'Calm'
+    : activity === 'balance-bar' ? 'Balance'
+    : 'Heart Rhythm';
+
+  const primaryColor  = activity === 'neural-ball' ? '#22d3ee'
+    : activity === 'ocean-waves' ? '#38bdf8'
+    : activity === 'balance-bar' ? '#a78bfa'
+    : '#fb7185';
+
+  const primaryFill = activity === 'neural-ball' ? 'rgba(34,211,238,0.12)'
+    : activity === 'ocean-waves' ? 'rgba(56,189,248,0.12)'
+    : activity === 'balance-bar' ? 'rgba(167,139,250,0.12)'
+    : 'rgba(251,113,133,0.12)';
+
+  // Downsample for SVG performance
+  const step = Math.max(1, Math.floor(data.length / 300));
+  const pts = data.filter((_, i) => i % step === 0);
+  const n = pts.length;
+
+  const svgW = 640;
+  const svgH = 220;
+  const pad = { top: 24, bottom: 28, left: 38, right: 16 };
+  const gW = svgW - pad.left - pad.right;
+  const gH = svgH - pad.top - pad.bottom;
+
+  const xi = (i: number) => pad.left + (i / Math.max(n - 1, 1)) * gW;
+  const yv = (v: number) => pad.top + gH - clamp(v) * gH;
+
+  // ── Find peak region for primary metric (rolling window ≈ 5% of session) ──
+  const WIN = Math.max(1, Math.floor(n / 20));
+  let bestIdx = WIN;
+  let bestVal = -Infinity;
+  for (let i = WIN; i < n - WIN; i++) {
+    let sum = 0;
+    for (let j = i - WIN; j <= i + WIN; j++) sum += (pts[j] as Record<string, number>)[primaryKey] ?? 0;
+    const a = sum / (2 * WIN + 1);
+    if (a > bestVal) { bestVal = a; bestIdx = i; }
+  }
+  const peakI = bestIdx;
+  const halfW = Math.max(WIN, Math.floor(n * 0.07));
+  const peakX1 = xi(Math.max(0, peakI - halfW));
+  const peakX2 = xi(Math.min(n - 1, peakI + halfW));
+  const peakValue = (pts[peakI] as Record<string, number>)[primaryKey] ?? 0;
+
+  // ── Build SVG paths ──
+  const primaryPath = pts.map((p, i) =>
+    `${i === 0 ? 'M' : 'L'} ${xi(i)} ${yv((p as Record<string, number>)[primaryKey] ?? 0)}`
+  ).join(' ');
+  const primaryArea = `${primaryPath} L ${xi(n - 1)} ${yv(0)} L ${xi(0)} ${yv(0)} Z`;
+
+  const focusPath   = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xi(i)} ${yv(p.focus)}`).join(' ');
+  const calmPath    = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xi(i)} ${yv(p.calm)}`).join(' ');
+  const controlPath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xi(i)} ${yv(p.control)}`).join(' ');
+
+  // ── Per-metric stats ──
+  const stat = (key: string) => {
+    const vals = pts.map(p => clamp((p as Record<string, number>)[key] ?? 0));
+    const avg = vals.reduce((a, b) => a + b, 0) / Math.max(vals.length, 1);
+    const peak = Math.max(...vals);
+    const above70 = Math.round((vals.filter(v => v >= 0.7).length / vals.length) * 100);
+    return { avg, peak, above70 };
+  };
+
+  const primaryStat = stat(primaryKey);
+  const focusStat   = stat('focus');
+  const calmStat    = stat('calm');
+
+  // ── Time labels ──
+  const timeTicks = [0, 0.25, 0.5, 0.75, 1].map(frac => {
+    const sec = Math.round(frac * durationSeconds);
+    const label = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60 > 0 ? ` ${sec % 60}s` : ''}` : `${sec}s`;
+    return { frac, label };
+  });
 
   return (
-    <div className="rounded-xl border border-gray-700 bg-black/30 p-4">
-      <p className="mb-4 text-sm font-semibold text-gray-300">Session Progression</p>
-      <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full">
-        <defs>
-          <linearGradient id="gridGrad" x1="0%" x2="100%">
-            <stop offset="0%" stopColor="rgba(100,100,150,0.1)" />
-            <stop offset="100%" stopColor="rgba(100,100,150,0.05)" />
-          </linearGradient>
-        </defs>
-        <rect x={padding} y={padding} width={graphW} height={graphH} fill="url(#gridGrad)" />
-        <text x={padding - 30} y={padding + graphH + 5} fontSize="11" fill="#888">0%</text>
-        <text x={padding - 30} y={padding + 10} fontSize="11" fill="#888">100%</text>
-        <path d={controlPath} stroke="#a855f7" strokeWidth="2" fill="none" />
-        <path d={focusPath} stroke="#06b6d4" strokeWidth="2" fill="none" />
-        <path d={calmPath} stroke="#ec4899" strokeWidth="2" fill="none" />
-      </svg>
-      <div className="mt-3 flex gap-4 text-xs">
-        <div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full bg-cyan-400" />Focus</div>
-        <div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full bg-pink-400" />Calm</div>
-        <div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full bg-purple-400" />Control</div>
+    <div className="space-y-4">
+      {/* Graph */}
+      <div className="rounded-xl border border-gray-700 bg-black/40 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-sm font-semibold text-gray-200">Signal Evolution</p>
+          <div className="flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium"
+            style={{ borderColor: `${primaryColor}50`, color: primaryColor, background: `${primaryColor}12` }}>
+            Peak {primaryLabel}: {Math.round(peakValue * 100)}%
+          </div>
+        </div>
+
+        <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id={`sg-fill-${activity}`} x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor={primaryColor} stopOpacity="0.14" />
+              <stop offset="100%" stopColor={primaryColor} stopOpacity="0.01" />
+            </linearGradient>
+          </defs>
+
+          {/* Zone bands: excellent ≥70%, good 50-70% */}
+          <rect x={pad.left} y={yv(1)} width={gW} height={yv(0.7) - yv(1)}
+            fill="rgba(52,211,153,0.05)" />
+          <rect x={pad.left} y={yv(0.7)} width={gW} height={yv(0.5) - yv(0.7)}
+            fill="rgba(250,204,21,0.04)" />
+
+          {/* Zone threshold lines */}
+          <line x1={pad.left} x2={pad.left + gW} y1={yv(0.7)} y2={yv(0.7)}
+            stroke="rgba(52,211,153,0.25)" strokeWidth="0.8" strokeDasharray="4 3" />
+          <line x1={pad.left} x2={pad.left + gW} y1={yv(0.5)} y2={yv(0.5)}
+            stroke="rgba(250,204,21,0.20)" strokeWidth="0.8" strokeDasharray="4 3" />
+
+          {/* Zone labels */}
+          {/* ── Primary area fill — drawn FIRST so all lines render on top ── */}
+          <path d={primaryArea} fill={`url(#sg-fill-${activity})`} opacity="0.7" />
+
+          {/* Zone labels — above the fill */}
+          <text x={pad.left + 4} y={yv(0.85) + 4} fontSize="8" fill="rgba(52,211,153,0.65)">Excellent</text>
+          <text x={pad.left + 4} y={yv(0.6) + 4} fontSize="8" fill="rgba(250,204,21,0.55)">Good</text>
+          <text x={pad.left + 4} y={yv(0.25) + 4} fontSize="8" fill="rgba(148,163,184,0.45)">Developing</text>
+
+          {/* Peak highlight band */}
+          <rect x={peakX1} y={pad.top} width={Math.max(peakX2 - peakX1, 2)} height={gH}
+            fill="rgba(255,255,255,0.04)" stroke={primaryColor} strokeWidth="0.7" strokeOpacity="0.5" rx="2" />
+          <text x={(peakX1 + peakX2) / 2} y={pad.top - 6} fontSize="8.5"
+            fill={primaryColor} textAnchor="middle" fontWeight="500">
+            ★ Peak {primaryLabel}
+          </text>
+
+          {/* Y-axis ticks */}
+          {[0, 0.25, 0.5, 0.75, 1].map(v => (
+            <g key={v}>
+              <line x1={pad.left - 3} x2={pad.left} y1={yv(v)} y2={yv(v)} stroke="#555" strokeWidth="1" />
+              <text x={pad.left - 5} y={yv(v) + 3.5} fontSize="8.5" fill="#666" textAnchor="end">
+                {Math.round(v * 100)}%
+              </text>
+            </g>
+          ))}
+
+          {/* Time axis */}
+          {timeTicks.map(({ frac, label }) => {
+            const tx = pad.left + frac * gW;
+            return (
+              <g key={frac}>
+                <line x1={tx} x2={tx} y1={pad.top + gH} y2={pad.top + gH + 3} stroke="#555" strokeWidth="1" />
+                <text x={tx} y={svgH - 6} fontSize="8.5" fill="#666" textAnchor="middle">{label}</text>
+              </g>
+            );
+          })}
+
+          {/* ── All metric lines — all rendered after the fill so none are hidden ── */}
+          {/* Non-primary lines: same weight, clearly visible */}
+          {primaryKey !== 'focus' && (
+            <path d={focusPath} stroke="#06b6d4" strokeWidth="1.6" fill="none" opacity="0.75" strokeLinejoin="round" />
+          )}
+          {primaryKey !== 'calm' && (
+            <path d={calmPath} stroke="#ec4899" strokeWidth="1.6" fill="none" opacity="0.75" strokeLinejoin="round" />
+          )}
+          <path d={controlPath} stroke="#a855f7" strokeWidth="1.6" fill="none" opacity="0.6" strokeLinejoin="round" />
+
+          {/* Primary line — slightly bolder but same visual weight family */}
+          <path d={primaryPath} stroke={primaryColor} strokeWidth="2.2" fill="none" strokeLinejoin="round" />
+
+          {/* Peak dot — topmost element */}
+          <circle cx={xi(peakI)} cy={yv(peakValue)} r="4"
+            fill={primaryColor} stroke="#000" strokeWidth="1.5"
+            style={{ filter: `drop-shadow(0 0 5px ${primaryColor})` }} />
+        </svg>
+
+        {/* Legend */}
+        <div className="mt-2 flex flex-wrap gap-4 text-xs text-gray-400">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2 w-4 rounded-full" style={{ background: primaryColor }} />
+            {primaryLabel} (primary)
+          </span>
+          {primaryKey !== 'focus' && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-1 w-4 rounded-full bg-cyan-400 opacity-50" />Focus
+            </span>
+          )}
+          {primaryKey !== 'calm' && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-1 w-4 rounded-full bg-pink-400 opacity-50" />Calm
+            </span>
+          )}
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-1 w-4 rounded-full bg-purple-400 opacity-40" />Control
+          </span>
+        </div>
+      </div>
+
+      {/* Per-metric stat cards — deduplicate so the primary metric doesn't appear twice */}
+      <div className="grid grid-cols-3 gap-3 text-xs">
+        {([
+          { key: primaryKey,  label: primaryLabel, color: primaryColor, s: primaryStat },
+          { key: 'focus',     label: 'Focus',      color: '#22d3ee',    s: focusStat  },
+          { key: 'calm',      label: 'Calm',       color: '#ec4899',    s: calmStat   },
+        ] as Array<{ key: string; label: string; color: string; s: ReturnType<typeof stat> }>)
+          .filter((item, idx, arr) => arr.findIndex(x => x.key === item.key) === idx)
+          .map(({ key, label, color, s }) => (
+          <div key={key} className="rounded-xl border border-gray-800 bg-gray-900/50 p-3 space-y-2">
+            <div className="flex items-center gap-1.5">
+              <span className="inline-block h-2 w-2 rounded-full flex-shrink-0" style={{ background: color }} />
+              <span className="font-semibold text-gray-200">{label}</span>
+            </div>
+            <div className="space-y-1 text-gray-400">
+              <div className="flex justify-between">
+                <span>Avg</span>
+                <span className="font-medium text-gray-200">{Math.round(s.avg * 100)}%</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Peak</span>
+                <span className="font-medium" style={{ color }}>{Math.round(s.peak * 100)}%</span>
+              </div>
+            </div>
+            {/* Mini bar */}
+            <div className="h-1 rounded-full bg-gray-800">
+              <div className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${Math.round(s.avg * 100)}%`, background: color }} />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -292,8 +494,18 @@ function estimateBpm(data: number[]): number | null {
 }
 
 // ── Running visualizations ─────────────────────────────────────────────────
-function OceanWavesVisualization({ metrics }: { metrics: ReturnType<typeof calculateBrainMetrics> }) {
-  const calmLevel = clamp(metrics.calm);
+function OceanWavesVisualization({ metrics, emotionScores }: {
+  metrics: ReturnType<typeof calculateBrainMetrics>;
+  emotionScores?: EmotionScores | null;
+}) {
+  // Use backend relaxed score (updates ~every 5s, already smoothed) when available.
+  // Apply an additional slow exponential moving average to prevent visual jumps.
+  const smoothedCalmRef = useRef<number>(0.5);
+  const rawCalm = emotionScores != null ? clamp(emotionScores.relaxed) : clamp(metrics.calm);
+  // EMA with α=0.05 → very slow response (~20 updates to converge)
+  smoothedCalmRef.current = smoothedCalmRef.current * 0.95 + rawCalm * 0.05;
+  const calmLevel = smoothedCalmRef.current;
+
   const phaseRef = useRef([0, 0, 0]);
   const animFrameRef = useRef<number | null>(null);
   const [wavePaths, setWavePaths] = useState<string[]>(['', '', '']);
@@ -317,7 +529,8 @@ function OceanWavesVisualization({ metrics }: { metrics: ReturnType<typeof calcu
     const svgH = 160;
 
     const animate = () => {
-      const calm = clamp(metrics.calm);
+      // Read the current smoothed calm from the ref so we don't restart the loop on every change
+      const calm = smoothedCalmRef.current;
       phaseRef.current = phaseRef.current.map((p, i) => p + speeds[i] * (1 + (1 - calm) * 1.5));
       const paths = maxAmps.map((maxAmp, i) => {
         const amplitude = (1 - calm) * maxAmp + 4;
@@ -331,7 +544,9 @@ function OceanWavesVisualization({ metrics }: { metrics: ReturnType<typeof calcu
     return () => {
       if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [metrics.calm]);
+  // Run once on mount — animation loop reads smoothedCalmRef which is always current
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const waveColors = ['#0ea5e9', '#38bdf8', '#7dd3fc'];
   const waveOpacities = [0.8, 0.6, 0.4];
@@ -417,6 +632,13 @@ function OceanWavesVisualization({ metrics }: { metrics: ReturnType<typeof calcu
           <p className="mt-1 text-xs text-gray-500">Current mental state</p>
         </div>
       </div>
+
+      {/* Instructions */}
+      <div className="rounded-xl border border-blue-900/50 bg-blue-950/30 p-4 text-sm space-y-2">
+        <p className="font-semibold text-blue-200">How to calm the waves</p>
+        <p className="text-gray-400">Relax your jaw, drop your shoulders, and breathe slowly and deeply from your belly — not your chest. Let your thoughts settle without forcing them.</p>
+        <p className="text-gray-500 text-xs">Goal: still the waves so they become gentle ripples. The calmer your mind, the flatter the ocean becomes.</p>
+      </div>
     </div>
   );
 }
@@ -493,8 +715,12 @@ function BalanceBarVisualization({ metrics, eegData }: {
           </div>
         </div>
 
-        {/* Goal text */}
-        <p className="text-center text-sm text-gray-400">Keep the needle centered for whole-brain thinking</p>
+        {/* Instructions */}
+        <div className="rounded-xl border border-violet-900/50 bg-violet-950/30 p-4 text-sm space-y-2">
+          <p className="font-semibold text-violet-200">How to center the needle</p>
+          <p className="text-gray-400">Aim for an open, relaxed awareness — not actively thinking hard (which activates left/logical brain) and not zoning out (which tips right/creative brain). A gentle mindful presence works best.</p>
+          <p className="text-gray-500 text-xs">Goal: keep the needle in the green zone for as long as possible. Your balance score shows the percentage of time spent centered.</p>
+        </div>
 
         {/* Stats */}
         <div className="grid grid-cols-3 gap-3 text-sm">
@@ -519,12 +745,13 @@ function BalanceBarVisualization({ metrics, eegData }: {
   );
 }
 
-function RunningVisualization({ selectedActivity, progressValue, metrics, ppgData, eegData }: {
+function RunningVisualization({ selectedActivity, progressValue, metrics, ppgData, eegData, emotionScores }: {
   selectedActivity: ActivityId;
   progressValue: number;
   metrics: ReturnType<typeof calculateBrainMetrics>;
   ppgData: number[];
   eegData: EEGData[];
+  emotionScores?: EmotionScores | null;
 }) {
   if (selectedActivity === 'neural-ball') {
     const displayProgress = clamp(metrics.focus);
@@ -555,7 +782,7 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
                 width: `${scale * (0.7 + displayProgress * 0.5) * 200}px`,
                 height: `${scale * (0.7 + displayProgress * 0.5) * 200}px`,
                 borderColor: `hsla(${hue}, 70%, 60%, ${0.25 - i * 0.07})`,
-                transition: 'all 450ms ease',
+                transition: 'all 800ms ease',
               }}
             />
           ))}
@@ -566,7 +793,7 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
               height: `${(0.7 + displayProgress * 0.5) * 200}px`,
               background: `radial-gradient(circle, hsl(${hue},80%,60%) 0%, hsl(${hue},60%,30%) 100%)`,
               boxShadow: `0 0 ${glow}px hsl(${hue},80%,60%)`,
-              transition: 'all 450ms ease',
+              transition: 'all 800ms ease',
             }}
           >
             {Math.round(displayProgress * 100)}%
@@ -581,19 +808,26 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
             <span style={{ color: isGood ? '#22d3ee' : '#f87171' }} className="font-semibold">{Math.round(metrics.focus * 100)}%</span>
           </div>
           <div className="mt-2 h-2 rounded-full bg-gray-800">
-            <div className="h-full rounded-full transition-all duration-300"
+            <div className="h-full rounded-full transition-all duration-700"
               style={{ width: `${Math.round(metrics.focus * 100)}%`, background: isGood ? '#22d3ee' : '#f87171' }} />
           </div>
           <p className="mt-1 text-xs" style={{ color: isGood ? '#22d3ee90' : '#f8717190' }}>
             Frontal engagement · {isGood ? '✓ Good' : 'Needs work'}
           </p>
         </div>
+
+        {/* Instructions */}
+        <div className="w-full max-w-sm rounded-xl border border-cyan-900/50 bg-cyan-950/30 p-4 text-sm space-y-2">
+          <p className="font-semibold text-cyan-200">How to grow the sphere</p>
+          <p className="text-gray-400">Fix your gaze on a single point. Engage actively with a task or thought — count backwards, recall details, or solve a mental problem. The more your frontal brain fires, the bigger it grows.</p>
+          <p className="text-gray-500 text-xs">Goal: push the sphere past 70% and hold it there. Avoid mind-wandering or passive staring.</p>
+        </div>
       </div>
     );
   }
 
   if (selectedActivity === 'ocean-waves') {
-    return <OceanWavesVisualization metrics={metrics} />;
+    return <OceanWavesVisualization metrics={metrics} emotionScores={emotionScores} />;
   }
 
   if (selectedActivity === 'balance-bar') {
@@ -601,27 +835,57 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
   }
 
   // ── Pulse Pilot ────────────────────────────────────────────────────────
+  const bpmHistoryRef = useRef<number[]>([]);
   const ppgWindow = ppgData.slice(-PPG_FS * 10);
-  const estBpm = estimateBpm(ppgWindow);
+  const rawBpm = estimateBpm(ppgWindow);
+  if (rawBpm !== null) {
+    bpmHistoryRef.current = [...bpmHistoryRef.current.slice(-5), rawBpm];
+  }
+  const smoothedBpm = bpmHistoryRef.current.length > 0
+    ? Math.round(average(bpmHistoryRef.current))
+    : null;
 
-  const wavePoints = ppgData.slice(-PPG_FS * 5); // 5 seconds
-  const waveMin = Math.min(...wavePoints, 0);
-  const waveMax = Math.max(...wavePoints, 1);
-  const waveRange = Math.max(waveMax - waveMin, 1);
-  const normalizedWave = wavePoints.map((v) => clamp((v - waveMin) / waveRange));
-  const smoothedWave = normalizedWave.map((_, i) => {
-    const s = Math.max(i - 2, 0);
-    const e = Math.min(i + 3, normalizedWave.length);
-    return average(normalizedWave.slice(s, e));
-  });
-  const svgH = 200;
+  // Signal quality classification
+  const sigQuality: 'good' | 'weak' | 'collecting' | 'none' = (() => {
+    if (ppgData.length < PPG_FS * 3) return 'collecting';
+    if (rawBpm !== null) return 'good';
+    const w = ppgData.slice(-PPG_FS * 5);
+    const m = average(w);
+    const s = Math.sqrt(average(w.map(v => (v - m) ** 2)));
+    if (s < 1) return 'none';
+    return 'weak';
+  })();
+  const sigQualityLabel = { good: '✓ Good Signal', weak: '⚠ Weak Signal', collecting: 'Collecting…', none: '✕ No Signal' }[sigQuality];
+  const sigQualityColor = { good: '#34d399', weak: '#f59e0b', collecting: '#94a3b8', none: '#f87171' }[sigQuality];
+
+  // PPG waveform: fix normalization using actual min/max (not forced-zero)
+  const wavePoints = ppgData.slice(-PPG_FS * 5); // 5 seconds = 320 samples
+  const svgH = 160;
   const svgW = 520;
-  const linePoints = smoothedWave.map((v, i) => ({
-    x: (i / Math.max(smoothedWave.length - 1, 1)) * svgW,
-    y: svgH - v * (svgH - 24) - 12,
-  }));
-  const linePath = linePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-  const areaPath = `${linePath} L ${svgW} ${svgH - 10} L 0 ${svgH - 10} Z`;
+  let linePath = '';
+  let areaPath = '';
+  const hasWave = wavePoints.length > 4;
+  if (hasWave) {
+    const wMin = Math.min(...wavePoints);
+    const wMax = Math.max(...wavePoints);
+    const wRange = Math.max(wMax - wMin, 1);
+    // Heavy smoothing: 15-point moving average
+    const norm = wavePoints.map(v => (v - wMin) / wRange);
+    const smoothed = norm.map((_, i) => {
+      const s = Math.max(i - 7, 0);
+      const e = Math.min(i + 8, norm.length);
+      return average(norm.slice(s, e));
+    });
+    // Map to SVG: center vertically with 20% padding top/bottom
+    const pad = svgH * 0.2;
+    const pts = smoothed.map((v, i) => ({
+      x: (i / Math.max(smoothed.length - 1, 1)) * svgW,
+      y: svgH - pad - v * (svgH - 2 * pad),
+    }));
+    linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+    areaPath = `${linePath} L ${svgW} ${svgH} L 0 ${svgH} Z`;
+  }
+
   const coherence = clamp(metrics.ppgRegulation * 0.7 + metrics.calm * 0.3);
   const regulationColor = metrics.ppgRegulation > 0.72 ? '#fb7185' : metrics.ppgRegulation > 0.45 ? '#f59e0b' : '#94a3b8';
   const stabilityLabel = metrics.ppgRegulation > 0.72 ? 'Smooth — excellent coherence' : metrics.ppgRegulation > 0.45 ? 'Moderate — keep breathing slowly' : 'Irregular — slow your breath';
@@ -682,28 +946,28 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
         {/* PPG waveform */}
         <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(248,113,113,0.06),rgba(15,23,42,0.95))]" />
-          <p className="absolute left-3 top-2 text-xs uppercase tracking-[0.2em] text-slate-400">Heart Rhythm Stream</p>
+          <div className="absolute left-3 top-2 flex items-center gap-2">
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Heart Rhythm</p>
+            <span className="text-[10px] font-medium px-2 py-0.5 rounded-full border"
+              style={{ color: sigQualityColor, borderColor: `${sigQualityColor}40`, background: `${sigQualityColor}15` }}>
+              {sigQualityLabel}
+            </span>
+          </div>
           <p className="absolute right-3 top-2 text-xs text-slate-500">Last 5 seconds</p>
-          {linePoints.length > 2 ? (
-            <svg viewBox={`0 0 ${svgW} ${svgH}`} className="h-52 w-full" preserveAspectRatio="none">
+          {hasWave ? (
+            <svg viewBox={`0 0 ${svgW} ${svgH}`} className="mt-6 h-44 w-full" preserveAspectRatio="xMidYMid meet">
               <defs>
                 <linearGradient id="ppArea" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stopColor="rgba(251,113,133,0.40)" />
+                  <stop offset="0%" stopColor="rgba(251,113,133,0.35)" />
                   <stop offset="100%" stopColor="rgba(251,113,133,0)" />
                 </linearGradient>
-                <pattern id="ppGrid" width="36" height="22" patternUnits="userSpaceOnUse">
-                  <path d="M 36 0 L 0 0 0 22" fill="none" stroke="rgba(148,163,184,0.14)" strokeWidth="1" />
-                </pattern>
               </defs>
-              <rect width={svgW} height={svgH} fill="url(#ppGrid)" />
               <path d={areaPath} fill="url(#ppArea)" />
-              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" opacity="0.15" />
-              <circle cx={linePoints[linePoints.length - 1]?.x} cy={linePoints[linePoints.length - 1]?.y} r={4}
-                fill={regulationColor} style={{ filter: 'drop-shadow(0 0 7px rgba(251,113,133,0.65))' }} />
+              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d={linePath} fill="none" stroke={regulationColor} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" opacity="0.12" />
             </svg>
           ) : (
-            <div className="flex h-52 items-center justify-center text-sm text-slate-500">Waiting for PPG data…</div>
+            <div className="flex h-44 items-center justify-center text-sm text-slate-500">Waiting for PPG data…</div>
           )}
         </div>
       </div>
@@ -714,7 +978,7 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
           <p className="text-xs text-gray-400">HRV Coherence</p>
           <p className="mt-1 text-xl font-semibold text-rose-300">{Math.round(metrics.ppgRegulation * 100)}%</p>
           <div className="mt-2 h-1.5 rounded-full bg-gray-800">
-            <div className="h-full rounded-full bg-rose-400 transition-all duration-300" style={{ width: `${Math.round(metrics.ppgRegulation * 100)}%` }} />
+            <div className="h-full rounded-full bg-rose-400 transition-all duration-700" style={{ width: `${Math.round(metrics.ppgRegulation * 100)}%` }} />
           </div>
           <p className="mt-1 text-xs text-gray-500">Smoother = better vagal tone</p>
         </div>
@@ -722,14 +986,22 @@ function RunningVisualization({ selectedActivity, progressValue, metrics, ppgDat
           <p className="text-xs text-gray-400">Neural Calm</p>
           <p className="mt-1 text-xl font-semibold text-pink-300">{Math.round(metrics.calm * 100)}%</p>
           <div className="mt-2 h-1.5 rounded-full bg-gray-800">
-            <div className="h-full rounded-full bg-pink-400 transition-all duration-300" style={{ width: `${Math.round(metrics.calm * 100)}%` }} />
+            <div className="h-full rounded-full bg-pink-400 transition-all duration-700" style={{ width: `${Math.round(metrics.calm * 100)}%` }} />
           </div>
         </div>
         <div className="rounded-lg border border-gray-700 bg-black/40 p-3">
           <p className="text-xs text-gray-400">Est. Heart Rate</p>
-          <p className="mt-1 text-xl font-semibold text-orange-300">{estBpm !== null ? `${estBpm} bpm` : '—'}</p>
-          <p className="mt-3 text-xs text-gray-500">Target: 50–70 bpm during exercise</p>
+          <p className="mt-1 text-xl font-semibold text-orange-300">{smoothedBpm !== null ? `${smoothedBpm} bpm` : '—'}</p>
+          <p className="mt-1 text-xs text-gray-500" style={{ color: sigQualityColor }}>{sigQualityLabel}</p>
+          <p className="mt-1 text-xs text-gray-500">Target: 50–70 bpm during exercise</p>
         </div>
+      </div>
+
+      {/* Instructions */}
+      <div className="rounded-xl border border-rose-900/50 bg-rose-950/30 p-4 text-sm space-y-2">
+        <p className="font-semibold text-rose-200">How to use this exercise</p>
+        <p className="text-gray-400">Follow the circle — breathe IN as it expands (4s), HOLD when it pauses (1s), breathe OUT as it shrinks (6s), HOLD again (1s). Breathe from your belly, not your chest.</p>
+        <p className="text-gray-500 text-xs">Goal: smooth out your heart rhythm so HRV Coherence climbs above 70%. This 4-1-6-1 pattern activates your vagus nerve, building long-term stress resilience.</p>
       </div>
     </div>
   );
@@ -739,6 +1011,7 @@ export default function CognitiveTrainingView({
   eegData,
   ppgData,
   predictedVAD,
+  emotionScores,
   connectionStatus,
   sampleCount,
   needsConnect = false,
@@ -759,7 +1032,29 @@ export default function CognitiveTrainingView({
   const [sessionStats, setSessionStats] = useState<Array<{ focus: number; calm: number; control: number; ppg: number; symmetry: number }>>([]);
   const [peakValue, setPeakValue] = useState(0);
   const lapTimeRef = useRef<number | null>(null);
-  const metrics = useMemo(() => calculateBrainMetrics(eegData, ppgData, predictedVAD), [eegData, ppgData, predictedVAD]);
+
+  // Raw metrics computed from latest EEG window
+  const rawMetrics = useMemo(() => calculateBrainMetrics(eegData, ppgData, predictedVAD), [eegData, ppgData, predictedVAD]);
+
+  // Rolling average smoothing — history kept in a ref, stable object via useMemo so the
+  // progress useEffect below only fires when EEG data actually changes (not every render).
+  const metricsHistoryRef = useRef<ReturnType<typeof calculateBrainMetrics>[]>([]);
+  const metrics = useMemo(() => {
+    metricsHistoryRef.current = [...metricsHistoryRef.current.slice(-9), rawMetrics];
+    const h = metricsHistoryRef.current;
+    return {
+      focus:         average(h.map(m => m.focus)),
+      calm:          average(h.map(m => m.calm)),
+      control:       average(h.map(m => m.control)),
+      symmetry:      average(h.map(m => m.symmetry)),
+      stability:     average(h.map(m => m.stability)),
+      ppgRegulation: average(h.map(m => m.ppgRegulation)),
+      af7Energy:     average(h.map(m => m.af7Energy)),
+      af8Energy:     average(h.map(m => m.af8Energy)),
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawMetrics]);
+
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedActivity: ActivityId = selectedGoal ? GOAL_TO_ACTIVITY[selectedGoal] : 'neural-ball';
@@ -990,6 +1285,7 @@ export default function CognitiveTrainingView({
               metrics={metrics}
               ppgData={ppgData}
               eegData={eegData}
+              emotionScores={emotionScores}
             />
 
             <div className="mx-auto grid max-w-3xl grid-cols-2 gap-3 text-sm md:grid-cols-4">
@@ -1085,7 +1381,11 @@ export default function CognitiveTrainingView({
               {/* Session progression graph */}
               <div className="space-y-3">
                 <h4 className="text-sm font-semibold uppercase tracking-widest text-gray-400">Signal Evolution</h4>
-                <SessionGraph data={sessionStats} />
+                <SessionGraph
+                  data={sessionStats}
+                  activity={selectedActivity}
+                  durationSeconds={durationMinutes * 60}
+                />
               </div>
 
               {/* Detailed observations */}

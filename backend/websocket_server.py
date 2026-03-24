@@ -6,6 +6,7 @@ Receives EEG samples from frontend and returns emotion predictions.
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
+import db as _db
 from CNN_prediction import CNNEmotionPredictor
 from LSTM_prediction import LSTMEmotionPredictor
 from KAN_prediction import EmotionPredictor as KANEmotionPredictor
@@ -36,6 +37,7 @@ args = parser.parse_args()
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+_db.init_db()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading',
                     ping_timeout=120, ping_interval=25)
 
@@ -453,8 +455,13 @@ def health_check():
 
 @app.route('/user/exists', methods=['GET'])
 def user_exists():
-    """Check whether a baseline profile exists (used by setup flow)."""
-    exists = os.path.exists(BASELINE_PKL)
+    """Check whether a baseline profile exists.
+    If ?user_id=N is given, checks the DB for that user; otherwise checks baseline.pkl."""
+    user_id = request.args.get('user_id', type=int)
+    if user_id is not None:
+        exists = _db.has_baseline(user_id)
+    else:
+        exists = os.path.exists(BASELINE_PKL)
     return jsonify({'exists': exists})
 
 
@@ -529,12 +536,25 @@ def calibration_build():
 
         # Persist baseline so the emotion predictor is personalised on server restart
         try:
+            baseline_payload = {
+                "baseline_for_emotion": np.concatenate(baseline_windows, axis=1),
+                "n_baseline_windows":   len(baseline_windows),
+            }
             with open(BASELINE_PKL, "wb") as fh:
-                pickle.dump({
-                    "baseline_for_emotion": np.concatenate(baseline_windows, axis=1),
-                    "n_baseline_windows":   len(baseline_windows),
-                }, fh)
+                pickle.dump(baseline_payload, fh)
             print(f"[OK] Baseline saved to {BASELINE_PKL}")
+
+            # Also store in DB keyed by user_id (if provided)
+            user_id = body.get('user_id')
+            if user_id is not None:
+                try:
+                    import io
+                    buf = io.BytesIO()
+                    pickle.dump(baseline_payload, buf)
+                    _db.save_baseline(int(user_id), buf.getvalue())
+                    print(f"[OK] Baseline saved to DB for user_id={user_id}")
+                except Exception as _e:
+                    print(f"⚠️  Could not save baseline to DB: {_e}")
         except Exception as e:
             print(f"⚠️  Could not save baseline.pkl: {e}")
 
@@ -660,6 +680,102 @@ def song_switch_report():
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ── User management ──────────────────────────────────────────────────────────
+
+@app.route('/users', methods=['GET'])
+def list_users():
+    """Return all registered user profiles."""
+    return jsonify({'users': _db.get_users()})
+
+
+@app.route('/users/find', methods=['GET'])
+def find_user():
+    """Look up a user by username (case-insensitive). Returns {user} or {user: null}."""
+    username = request.args.get('username', '').strip()
+    if not username:
+        return jsonify({'user': None})
+    users = _db.get_users()
+    match = next((u for u in users if u['username'].lower() == username.lower()), None)
+    if match:
+        match['has_baseline'] = _db.has_baseline(match['id'])
+    return jsonify({'user': match})
+
+
+@app.route('/users', methods=['POST'])
+def create_user():
+    """Create a new user. Body: { "username": "Alice" }"""
+    body = request.get_json(force=True) or {}
+    username = str(body.get('username', '')).strip()
+    if not username:
+        return jsonify({'error': 'username is required'}), 400
+    user = _db.create_user(username)
+    if user is None:
+        return jsonify({'error': 'Username already taken'}), 409
+    return jsonify(user), 201
+
+
+@app.route('/users/<int:user_id>/load-baseline', methods=['POST'])
+def load_user_baseline(user_id):
+    """Load the stored baseline for a user and make it the active baseline.pkl."""
+    blob = _db.load_baseline(user_id)
+    if blob is None:
+        return jsonify({'loaded': False, 'message': 'No baseline stored for this user'})
+    try:
+        with open(BASELINE_PKL, 'wb') as fh:
+            fh.write(blob)
+        # Reload the active predictor with the newly written baseline
+        with open(BASELINE_PKL, 'rb') as fh:
+            bdata = pickle.load(fh)
+        if isinstance(bdata, dict) and 'baseline_for_emotion' in bdata:
+            b = np.asarray(bdata['baseline_for_emotion'])
+            bc = {'tp9': b[0], 'af7': b[1], 'af8': b[2], 'tp10': b[3]}
+            global predictor
+            if isinstance(predictor, RuleBasedEmotionPredictor):
+                predictor = RuleBasedEmotionPredictor(baseline_channels=bc)
+        print(f"[OK] Active baseline switched to user_id={user_id}")
+        return jsonify({'loaded': True})
+    except Exception as e:
+        return jsonify({'loaded': False, 'message': str(e)})
+
+
+# ── Session & feedback storage ───────────────────────────────────────────────
+
+@app.route('/sessions', methods=['POST'])
+def save_session_route():
+    """Save a completed session. Body: { user_id, mode, started_at, ended_at, duration_seconds, data }"""
+    try:
+        body = request.get_json(force=True) or {}
+        import json as _json
+        sid = _db.save_session(
+            user_id=body.get('user_id'),
+            mode=body.get('mode', 'focus'),
+            started_at=body.get('started_at', ''),
+            ended_at=body.get('ended_at', ''),
+            duration_seconds=int(body.get('duration_seconds', 0)),
+            data_json=_json.dumps(body.get('data', {})),
+        )
+        return jsonify({'session_id': sid}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/feedback', methods=['POST'])
+def save_feedback_route():
+    """Save evaluation feedback. Body: { user_id, session_id, sus_score, responses }"""
+    try:
+        body = request.get_json(force=True) or {}
+        import json as _json
+        fid = _db.save_feedback(
+            user_id=body.get('user_id'),
+            session_id=body.get('session_id'),
+            sus_score=float(body.get('sus_score', 0)),
+            responses_json=_json.dumps(body.get('responses', {})),
+        )
+        return jsonify({'feedback_id': fid}), 201
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 

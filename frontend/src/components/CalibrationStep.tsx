@@ -292,10 +292,14 @@ export default function CalibrationStep({ onComplete }: Props) {
         );
       }
 
+      const userId = sessionStorage.getItem('neurovibe_user_id');
       const resp = await fetch('http://localhost:5000/calibration/build', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ baseline_samples: baselineWindows }),
+        body:    JSON.stringify({
+          baseline_samples: baselineWindows,
+          ...(userId ? { user_id: Number(userId) } : {}),
+        }),
       });
 
       if (!resp.ok) {

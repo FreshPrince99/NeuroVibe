@@ -118,8 +118,46 @@ export default function EmotionPage() {
   };
 
   const handleStopSession = () => {
-    finaliseSession();
+    const s = finaliseSession();
+    const userId = sessionStorage.getItem('neurovibe_user_id');
+    const durationSeconds = s.endTime
+      ? Math.round((s.endTime - s.startTime) / 1000)
+      : 0;
+
+    // Save session to DB immediately (non-blocking — navigate right away)
+    fetch('http://localhost:5000/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId ? Number(userId) : null,
+        mode: s.mode,
+        started_at: new Date(s.startTime).toISOString(),
+        ended_at: s.endTime ? new Date(s.endTime).toISOString() : '',
+        duration_seconds: durationSeconds,
+        data: s,
+      }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d?.session_id) {
+          sessionStorage.setItem('neurovibe_last_session_id', String(d.session_id));
+        }
+      })
+      .catch(err => console.error('[NeuroVibe] Session save failed:', err));
+
     router.push('/results');
+  };
+
+  const handleLogout = () => {
+    sessionStorage.removeItem('neurovibe_user_id');
+    sessionStorage.removeItem('neurovibe_username');
+    sessionStorage.removeItem('neurovibe_last_session_id');
+    if (playerRef.current) playerRef.current.pause();
+    if (clientRef.current) clientRef.current.disconnect();
+    if (socketRef.current) socketRef.current.disconnect();
+    if (testModeIntervalRef.current) clearInterval(testModeIntervalRef.current);
+    if (watchdogRef.current) clearInterval(watchdogRef.current);
+    router.push('/');
   };
 
   // Initialize WebSocket connection (skip in test mode — backend is not needed)
@@ -529,8 +567,25 @@ export default function EmotionPage() {
     router.push('/');
   };
 
+  const username = typeof window !== 'undefined' ? sessionStorage.getItem('neurovibe_username') : null;
+
   return (
     <div className="relative">
+      {/* User pill + logout — top-left fixed */}
+      {username && (
+        <div className="fixed top-4 left-4 z-50 flex items-center gap-2">
+          <span className="rounded-full border border-purple-700/50 bg-gray-950/80 backdrop-blur-sm px-3 py-1.5 text-xs text-purple-300">
+            {username}
+          </span>
+          <button
+            onClick={handleLogout}
+            className="rounded-full border border-gray-700 bg-gray-950/80 backdrop-blur-sm px-3 py-1.5 text-xs text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors"
+          >
+            Log out
+          </button>
+        </div>
+      )}
+
       {valenceData && valenceData.valence !== "UNCERTAIN" && (
         <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl border backdrop-blur-md text-sm font-light shadow-xl"
           style={{
@@ -557,6 +612,7 @@ export default function EmotionPage() {
           eegData={eegDataBuffer}
           ppgData={ppgDataBuffer}
           predictedVAD={predictedVAD}
+          emotionScores={emotionScores}
           sampleCount={sampleCount}
           connectionStatus={connectionStatus}
           onPauseToggle={handlePauseToggle}
@@ -573,6 +629,7 @@ export default function EmotionPage() {
           eegData={eegDataBuffer}
           ppgData={ppgDataBuffer}
           predictedVAD={predictedVAD}
+          emotionScores={emotionScores}
           sampleCount={sampleCount}
           connectionStatus={connectionStatus}
           onPauseToggle={handlePauseToggle}

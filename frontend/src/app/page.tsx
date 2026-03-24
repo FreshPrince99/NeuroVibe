@@ -1,65 +1,177 @@
-import Image from "next/image";
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useState, useEffect } from "react";
+import LandingPage from "@/components/LandingPage";
+
+interface User { id: number; username: string; created_at: string; has_baseline?: boolean; }
 
 export default function Home() {
+  const router = useRouter();
+  const [showPicker, setShowPicker] = useState(false);
+  const [users, setUsers] = useState<User[]>([]);
+  const [nameInput, setNameInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const fetchUsers = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/users');
+      if (res.ok) {
+        const data = await res.json();
+        // Enrich each user with baseline info
+        const enriched: User[] = await Promise.all(
+          (data.users ?? []).map(async (u: User) => {
+            try {
+              const r = await fetch(`http://localhost:5000/user/exists?user_id=${u.id}`);
+              const d = await r.json();
+              return { ...u, has_baseline: d.exists };
+            } catch { return u; }
+          })
+        );
+        setUsers(enriched);
+      }
+    } catch { /* backend not running */ }
+  };
+
+  useEffect(() => {
+    if (showPicker) fetchUsers();
+  }, [showPicker]);
+
+  const handleGetStarted = () => {
+    setShowPicker(true);
+    setNameInput('');
+    setError('');
+  };
+
+  // Quick-select an existing profile from the list
+  const selectUser = async (user: User) => {
+    setLoading(true);
+    sessionStorage.setItem('neurovibe_user_id', String(user.id));
+    sessionStorage.setItem('neurovibe_username', user.username);
+    try {
+      await fetch(`http://localhost:5000/users/${user.id}/load-baseline`, { method: 'POST' });
+    } catch { /* backend may not be running yet */ }
+    setLoading(false);
+    router.push('/setup');
+  };
+
+  // Submit the name input: check → create or load
+  const handleNameSubmit = async () => {
+    const name = nameInput.trim();
+    if (!name) return;
+    setLoading(true);
+    setError('');
+
+    try {
+      // 1. Check if username already exists
+      const findRes = await fetch(`http://localhost:5000/users/find?username=${encodeURIComponent(name)}`);
+      const findData = await findRes.json();
+
+      if (findData.user) {
+        // Existing user
+        const user: User = findData.user;
+        sessionStorage.setItem('neurovibe_user_id', String(user.id));
+        sessionStorage.setItem('neurovibe_username', user.username);
+        if (user.has_baseline) {
+          // Load their baseline as the active one
+          await fetch(`http://localhost:5000/users/${user.id}/load-baseline`, { method: 'POST' });
+        }
+        setLoading(false);
+        router.push('/setup');
+      } else {
+        // New user — create
+        const createRes = await fetch('http://localhost:5000/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: name }),
+        });
+        if (createRes.status === 409) {
+          // Shouldn't happen (find didn't match), but handle race
+          setError('Something went wrong. Please try again.');
+          setLoading(false);
+          return;
+        }
+        const newUser: User = await createRes.json();
+        sessionStorage.setItem('neurovibe_user_id', String(newUser.id));
+        sessionStorage.setItem('neurovibe_username', newUser.username);
+        setLoading(false);
+        router.push('/setup');
+      }
+    } catch {
+      // Backend not running — store name locally and continue
+      sessionStorage.setItem('neurovibe_user_id', '');
+      sessionStorage.setItem('neurovibe_username', name);
+      setLoading(false);
+      router.push('/setup');
+    }
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <>
+      <LandingPage onGetStarted={handleGetStarted} />
+
+      {showPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-950 p-8 shadow-2xl">
+            <h2 className="text-xl font-semibold text-white mb-1">Who's using NeuroVibe?</h2>
+            <p className="text-sm text-gray-400 mb-6">
+              Enter your name. If you've used it before, your profile will be loaded automatically.
+            </p>
+
+            {/* Name input */}
+            <div className="flex gap-2 mb-3">
+              <input
+                type="text"
+                placeholder="Your name"
+                value={nameInput}
+                onChange={e => { setNameInput(e.target.value); setError(''); }}
+                onKeyDown={e => e.key === 'Enter' && handleNameSubmit()}
+                autoFocus
+                className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-white placeholder-gray-600 focus:border-gray-500 focus:outline-none"
+                maxLength={40}
+              />
+              <button
+                onClick={handleNameSubmit}
+                disabled={loading || !nameInput.trim()}
+                className="rounded-xl bg-white px-5 py-3 font-semibold text-black hover:bg-gray-200 transition-colors disabled:opacity-40"
+              >
+                {loading ? '…' : 'Continue'}
+              </button>
+            </div>
+            {error && <p className="mb-4 text-xs text-red-400">{error}</p>}
+
+            {/* Existing profiles (quick-click) */}
+            {users.length > 0 && (
+              <div className="mt-6 border-t border-gray-800 pt-5">
+                <p className="text-xs uppercase tracking-widest text-gray-500 mb-3">Or select a profile</p>
+                <div className="space-y-2 max-h-52 overflow-y-auto">
+                  {users.map(u => (
+                    <button
+                      key={u.id}
+                      onClick={() => selectUser(u)}
+                      disabled={loading}
+                      className="w-full flex items-center justify-between rounded-xl border border-gray-700 bg-gray-900 px-4 py-3 text-left hover:border-gray-500 hover:bg-gray-800 transition-all disabled:opacity-50"
+                    >
+                      <span className="text-white font-medium">{u.username}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${u.has_baseline ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'}`}>
+                        {u.has_baseline ? 'Ready' : 'Needs calibration'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowPicker(false)}
+              className="mt-5 text-xs text-gray-600 hover:text-gray-400 transition-colors"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              Cancel
+            </button>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      )}
+    </>
   );
 }

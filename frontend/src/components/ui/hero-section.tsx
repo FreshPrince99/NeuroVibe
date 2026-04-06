@@ -268,7 +268,7 @@ export function HeroSection({ onGetStarted }: HeroSectionProps) {
             <span>•</span>
             <span>🎵 Spotify API</span>
             <span>•</span>
-            <span>⚡ KAN Neural Network</span>
+            <span>⚡ Emotion Recognition Models</span>
           </div>
         </div>
       </div>

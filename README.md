@@ -2,6 +2,8 @@
 
 **NeuroVibe** is a real-time, emotion-aware music recommendation and cognitive training system. It reads live EEG signals from a **Muse 2** headset via Web Bluetooth, predicts the user's emotional state using machine learning models, and adapts Spotify playback accordingly. It also includes four EEG-driven cognitive training exercises and a full session analytics dashboard.
 
+https://github.com/user-attachments/assets/6e77990b-3faa-4570-b415-5db398a53177
+
 ---
 
 ## Table of Contents
